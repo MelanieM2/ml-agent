@@ -10,10 +10,13 @@ agent (or the external API call) a full data dump.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from typing import Callable, cast
+
 import pandas as pd
 from sklearn.datasets import load_breast_cancer, fetch_openml
-from typing import cast
 from sklearn.utils import Bunch
+
 
 
 def load_breast_cancer_dataset() -> tuple[pd.DataFrame, pd.Series]:
@@ -56,12 +59,37 @@ def load_climate_crashes_dataset() -> tuple[pd.DataFrame, pd.Series]:
     return X, y
 
 
-# Registry mapping a short name to its loader function. This is the
+# Each registry entry pairs a loader with dataset-level facts that must
+# never be guessed or re-derived at evaluation time - in particular
+# pos_label, which identifies the positive class for precision/recall.
+# This is a documented fact about the dataset (established once, via
+# label cross-checking against the dataset's own documentation), not a
+# judgment call - so it is never exposed to Gemini as a tool argument.
+# It is read internally, per dataset, by whichever code computes
+# evaluation metrics (see tools.py's evaluate_model).
+@dataclass(frozen=True)
+class DatasetSpec:
+    """One registry entry: how to load a dataset, plus facts about it
+    that must never be guessed at evaluation time."""
+    loader: Callable[[], tuple[pd.DataFrame, pd.Series]]
+    pos_label: int
+    description: str
+
+
+# Registry mapping a short name to its DatasetSpec. This is the
 # extension point: adding a new dataset later means writing one loader
 # function and adding one line here -- nothing else in the file changes.
-DATASET_LOADERS = {
-    "climate": load_climate_crashes_dataset,
-    "breast_cancer": load_breast_cancer_dataset,
+DATASET_LOADERS: dict[str, DatasetSpec] = {
+    "climate": DatasetSpec(
+        loader=load_climate_crashes_dataset,
+        pos_label=1,
+        description="1 = simulation failure (rare class, ~8.5%)",
+    ),
+    "breast_cancer": DatasetSpec(
+        loader=load_breast_cancer_dataset,
+        pos_label=1,
+        description="1 = benign (majority class) - opposite sense from climate",
+    ),
 }
 
 
@@ -74,7 +102,21 @@ def load_dataset(name: str) -> tuple[pd.DataFrame, pd.Series]:
     if name not in DATASET_LOADERS:
         available = ", ".join(DATASET_LOADERS.keys())
         raise ValueError(f"Unknown dataset '{name}'. Available: {available}")
-    return DATASET_LOADERS[name]()
+    return DATASET_LOADERS[name].loader()
+
+
+def get_pos_label(name: str) -> int:
+    """Look up the documented positive-class label for a dataset by name.
+
+    Kept as a separate accessor (rather than requiring every call site
+    to reach into DATASET_LOADERS[name].pos_label directly) so agent.py
+    and evaluate_model's construction have one obvious place to get this
+    fact from, matching the load_dataset pattern above.
+    """
+    if name not in DATASET_LOADERS:
+        available = ", ".join(DATASET_LOADERS.keys())
+        raise ValueError(f"Unknown dataset '{name}'. Available: {available}")
+    return DATASET_LOADERS[name].pos_label
 
 
 def inspect_dataset(X: pd.DataFrame, y: pd.Series) -> dict:
