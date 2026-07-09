@@ -28,10 +28,15 @@ from typing import Any, Callable
 
 def list_available_models() -> dict[str, Any]:
     """Returns supported model types and their tunable hyperparameter ranges.
-
     No parameters - this is a pure "what's on the menu" query. Gemini should
     call this before proposing a model, so that record_model_proposal's
     arguments stay within what train_model can actually accept.
+
+    Convention: all numeric "range" bounds are inclusive on both ends
+    (e.g. C=100.0 is itself a valid value, not just a descriptive ceiling).
+    This mirrors standard JSON Schema's minimum/maximum default behavior,
+    even though "range" itself is a project-specific field, not a real
+    JSON Schema keyword.
     """
     return {
         "models": {
