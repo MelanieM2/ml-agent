@@ -303,3 +303,12 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
         },
     },
 ]
+
+# Maps each schema's "name" to its real callable, for lookup by name.
+TOOL_FUNCTIONS: dict[str, Callable[..., Any]] = {
+    "list_available_models": list_available_models,
+    "train_model": train_model,
+    "evaluate_model": evaluate_model,
+    "record_model_proposal": record_model_proposal,
+    "record_convergence_decision": record_convergence_decision,
+}
