@@ -27,7 +27,7 @@ def run_agent_loop(
     initial_context: str,
     *,
     model: str = DEFAULT_MODEL,
-    max_iterations:  int = MAX_ITERATIONS,   #max_iterations = 2,
+    max_iterations:  int = MAX_ITERATIONS,  
 ) -> dict[str, Any]:
     """
     Runs the Gemini-orchestrated model-search loop against an
