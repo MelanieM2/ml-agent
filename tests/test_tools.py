@@ -1,7 +1,7 @@
 """Tests for tools.py: catches drift between TOOL_SCHEMAS and the real
 tool function signatures.
 
-Convention (inferred from evaluate_model's docstring): keyword-only
+Convention: keyword-only
 parameters are values injected internally via functools.partial by
 whatever wires the dispatch table (agent.py) - never something Gemini
 supplies or should see in a schema. This test excludes keyword-only

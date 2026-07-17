@@ -1,17 +1,18 @@
 # ml-agent
 
-_Last updated: 2026-07-13_
+_Last updated: 2026-07-15_
 
 Agentic ML experimentation assistant — an LLM (Gemini) orchestrates dataset inspection, model proposal, training, and evaluation over scikit-learn via native function-calling, iterating toward a target metric in a supervised loop.
 
 **Status: in progress.** This is Project 5 in a 10-step self-directed learning roadmap toward Data Science / ML Engineering / Agentic AI.
 
 - `dataset.py` — ✅ done and tested.
-- `tools.py` — ✅ done (5 tool schemas + inclusive-bounds convention documented).
+- `tools.py` — ✅ done (5 tool schemas + inclusive-bounds convention documented; `TOOL_FUNCTIONS` name→callable mapping added 2026-07-15, see "Project structure" below).
 - `trainer.py` — ✅ done. Real sklearn fit/predict logic implemented: `train_model` fits the correct estimator per `model_type` via a registry lookup against `tools.py`'s schema; `evaluate_model` computes accuracy, precision, recall, f1, and a correctly-oriented confusion matrix using `pos_label`.
 - `agent.py` — owns the train/test split for a run: loads the dataset, performs a stratified `train_test_split`, runs a statistical validation gate (`validate_split`) before any model touches the data, and binds the resulting train/test arrays into `Trainer` via `functools.partial`. **The actual multi-step orchestration loop (calling Gemini, dispatching, feeding results back) is still not wired into `agent.py`** — that logic exists and works in `gemini_client.py`, but `agent.py` doesn't yet call it directly; see "Development Notes" below.
 - `gemini_client.py` — ✅ **done and verified.** Implements the full agent loop: sends dataset context + tool schemas to Gemini, dispatches whichever tool call comes back, feeds results back, repeats until convergence or a max-iterations guard. Verified via multiple real end-to-end runs across both datasets (see "Data Science Notes" below).
-- Also not yet started: `test_trainer.py`, `test_tools.py`, `AGENTS.md`.
+- `test_tools.py` — ✅ **done, 11 tests passing (2026-07-15).** The `TOOL_SCHEMAS` ↔ real-function signature drift check, using `inspect.signature()`. See "`test_tools.py` — the schema/function drift check" below.
+- Also not yet started: `test_trainer.py`, `AGENTS.md`.
 
 ---
 
@@ -44,6 +45,7 @@ Deterministic code handles fact-gathering; the LLM handles reasoning under uncer
 This same principle extends deeper into the codebase over time:
 - Into `tools.py`: **which class counts as "positive"** for a given dataset is also a fact, not a judgment call, and is never something Gemini supplies or guesses (see "Datasets" → "What `pos_label` actually is" below).
 - Into `trainer.py`: **whether a proposed model/hyperparameter combination is even valid** is likewise a fact checked deterministically — against `list_available_models()`'s own schema — before any training happens, rather than left for Gemini's arguments to be trusted blindly (see "Validating Gemini's arguments before training" below).
+- Into `tools.py`'s parameter-visibility convention (confirmed 2026-07-15, project-wide, not a one-off): **keyword-only parameters are always internally injected, never something Gemini supplies or sees.** `evaluate_model`'s `pos_label` is the canonical example — it sits after `*` in the signature and is deliberately absent from its `TOOL_SCHEMAS` entry, because which class is "positive" is a documented dataset fact, not something Gemini should ever be asked to guess.
 
 ---
 
@@ -103,8 +105,8 @@ A key design decision, made explicit early rather than left implicit in code: na
      │ evaluate_model            │
      │ (model_ref, *, pos_label)  │  ← pos_label supplied internally
      │ → accuracy, precision,     │     by agent.py, NEVER by Gemini
-     │   recall, f1,               │
-     │   confusion_matrix          │
+     │   recall, f1,               │     (see keyword-only convention,
+     │   confusion_matrix          │     "Core architectural principle" above)
      └────────────┬────────────────┘
                   │
                   ▼
@@ -133,7 +135,57 @@ A key design decision, made explicit early rather than left implicit in code: na
 
 The two Category B tools are worth a brief word each, since their names alone don't say much. `record_model_proposal` is how Gemini puts a candidate on the table — a model type, its hyperparameters, and the reasoning behind choosing them — without anything being trained yet. `record_convergence_decision` is the checkpoint after a model has actually been evaluated: Gemini looks at the metrics it just got back and states, explicitly, whether to stop here or try again, along with why.
 
-All five tools above exist as ordinary Python functions in `tools.py`, but Gemini never sees Python — it needs each tool declared as a JSON schema (name, description, parameter types) before it can call any of them. That declaration lives in `TOOL_SCHEMAS`, a list at the bottom of `tools.py` that `gemini_client.py` hands to the Gemini API. It's kept as its own structure rather than auto-generated from the functions' docstrings above it, on purpose: **the schema text is what *Gemini* reads to decide when and how to call a tool, while the docstring is what a *human* reads to understand the code — the two audiences don't always need the same amount of detail, so letting the wording diverge slightly where it helps is a small deliberate cost, not an oversight**. The trade-off is that a signature change to a function requires a matching by-hand update to its schema entry — easy to forget. A planned mitigation (not yet implemented) is a `test_tools.py` check using `inspect.signature()` to compare each function's real parameters against its `TOOL_SCHEMAS` entry automatically.
+All five tools above exist as ordinary Python functions in `tools.py`, but Gemini never sees Python — it needs each tool declared as a JSON schema (name, description, parameter types) before it can call any of them. That declaration lives in `TOOL_SCHEMAS`, a list at the bottom of `tools.py` that `gemini_client.py` hands to the Gemini API. It's kept as its own structure rather than auto-generated from the functions' docstrings above it, on purpose: **the schema text is what *Gemini* reads to decide when and how to call a tool, while the docstring is what a *human* reads to understand the code — the two audiences don't always need the same amount of detail, so letting the wording diverge slightly where it helps is a small deliberate cost, not an oversight**. The trade-off is that a signature change to a function requires a matching by-hand update to its schema entry — easy to forget. **This mitigation is now implemented** — see "`test_tools.py` — the schema/function drift check" below.
+
+---
+
+## `test_tools.py` — the schema/function drift check
+
+_Added 2026-07-15._
+
+### Why this exists
+
+`TOOL_SCHEMAS` (what Gemini reads) and the real tool functions in `tools.py` describe the same thing twice, by hand, in two different places. If someone changes a function's parameters without updating the schema to match, Gemini either can't call the tool correctly, or silently sends an argument the function doesn't expect — a failure mode that doesn't surface until runtime, deep inside a live agent loop, usually as a confusing `TypeError`. `test_tools.py` catches that drift automatically, at test time, using `inspect.signature()` — Python's own reflection tool for reading a function's real parameter list without calling it.
+
+### The mechanism
+
+```
+        ┌────────────────────────────┐        ┌─────────────────────────────┐
+        │  Real function (tools.py)   │        │  TOOL_SCHEMAS entry          │
+        │  def train_model(            │        │  {"name": "train_model",     │
+        │      model_type: str,        │        │   "parameters": {            │
+        │      hyperparameters: dict)  │        │     "model_type": {...},     │
+        │                              │        │     "hyperparameters":{...}} │
+        └──────────────┬───────────────┘        └───────────────┬───────────────┘
+                       ▼                                        ▼
+              inspect.signature(fn)                     schema["parameters"]
+              → {"model_type", "hyperparameters"}         .keys()
+                       │                                        │
+                       └───────────────────┬────────────────────┘
+                                           ▼
+                              set comparison: do these
+                              two parameter-name sets
+                              match exactly?
+                                           │
+                              ┌────────────┴────────────┐
+                              ▼                          ▼
+                         MATCH → pass             MISMATCH → fail loudly,
+                                                   naming exactly which
+                                                   param is missing/extra
+```
+
+**In plain language:** this test exists so that if `tools.py` and `TOOL_SCHEMAS` ever disagree about what a tool's arguments look like, `pytest` fails immediately with a specific, named reason — instead of that disagreement surfacing as a confusing runtime error deep inside a live Gemini conversation.
+
+Three checks, specifically:
+1. **Name-match** — every parameter name in the function must appear in the schema, and vice versa (catches renamed/added/removed arguments).
+2. **Required-match** — every schema `required` entry must correspond to a real parameter with no default, and vice versa (catches a newly-optional argument whose schema entry was never updated).
+3. **Registration-match** — every `TOOL_SCHEMAS` name must map to a real, registered function, and vice versa (catches a tool Gemini could never actually reach, or a schema entry with nothing behind it).
+
+Keyword-only parameters (see the convention under "Core architectural principle" above) are excluded from all three checks, since they're never Gemini-visible in the first place.
+
+`TOOL_FUNCTIONS` — the name→callable mapping used by these checks — lives in `tools.py` itself, next to `TOOL_SCHEMAS` (not duplicated in the test file), so any future dispatch-table wiring in `agent.py` can reuse the same mapping rather than maintaining an equivalent one separately.
+
+**Result:** 11/11 passing, alongside the existing 9 in `test_dataset.py` (20/20 total).
 
 ---
 
@@ -336,23 +388,38 @@ CANDIDATE 1 — functools.partial (chosen)            CANDIDATE 2 — closure (n
 ## Project structure
 
 ```
-ml-agent/
-├── pyproject.toml
+.
+├── .env
 ├── .env.example
 ├── .gitignore
-├── AGENTS.md              # agent rules, guardrails, tool list, convergence criteria — not yet written
-├── main.py                # CLI entry point / interactive loop
+├── .python-version
+├── .vscode/
+│   └── settings.json
+├── AGENTS.md               # agent rules, guardrails, tool list, convergence criteria — not yet written
+├── DATA_SCIENCE_ANALYSIS.md
+├── README.md
+├── SECURITY.md
+├── TECHNICAL_NOTES.md
+├── main.py                 # CLI entry point / interactive loop
 ├── ml_agent/
-│   ├── dataset.py         # dataset-agnostic loading + inspection ✅ done
-│   ├── tools.py            # Gemini function-calling tool schemas ✅ done
-│   ├── gemini_client.py    # ✅ done — Gemini client + function-call dispatch loop, verified
-│   ├── trainer.py          # ✅ done — storage, validation, and real sklearn fit/predict/evaluate
-│   └── agent.py             # ✅ dispatch-table + split wiring done; orchestration loop still pending
-└── tests/
-    ├── test_dataset.py    # ✅ done, 9 passing tests
-    ├── test_tools.py       # not started
-    └── test_trainer.py     # not started
+│   ├── __init__.py
+│   ├── agent.py             # ✅ dispatch-table + split wiring done; orchestration loop still pending
+│   ├── dataset.py           # ✅ done — dataset-agnostic loading + inspection
+│   ├── gemini_client.py     # ✅ done — Gemini client + function-call dispatch loop, verified
+│   ├── tools.py              # ✅ done — Gemini function-calling tool schemas + TOOL_FUNCTIONS
+│   └── trainer.py            # ✅ done — storage, validation, and real sklearn fit/predict/evaluate
+├── pyproject.toml
+├── run_smoke_test.py         # hand-built end-to-end exercise of run_agent_loop; gitignored
+├── smoke_test.py             # isolated schema-construction check, no API key/network; gitignored
+├── tests/
+│   ├── __init__.py
+│   ├── test_dataset.py       # ✅ done, 9 passing tests
+│   ├── test_tools.py         # ✅ done, 11 passing tests (2026-07-15)
+│   └── test_trainer.py       # not yet started
+└── uv.lock
 ```
+
+`ml_agent/` is a real installed package — imports elsewhere use `from ml_agent.tools import ...`, `from ml_agent.dataset import ...`, etc., never bare top-level module names.
 
 ### Why `agent.py` and `gemini_client.py` are separate
 `gemini_client.py` only knows how to talk to Gemini and dispatch function calls. `agent.py` owns the actual multi-step state — what's been tried, results so far, whether to keep iterating. This separation allows convergence logic to be unit-tested without a live API call.
@@ -411,7 +478,7 @@ uv run python main.py
 uv run pytest -v
 ```
 
-Network-dependent behavior (the Climate Crashes OpenML fetch) is not exercised directly in tests — it's mocked. Currently 9 tests passing (`test_dataset.py`).
+Network-dependent behavior (the Climate Crashes OpenML fetch) is not exercised directly in tests — it's mocked. Currently **20 tests passing**: 9 in `test_dataset.py`, 11 in `test_tools.py` (added 2026-07-15).
 
 ---
 
@@ -440,6 +507,10 @@ Building and verifying `gemini_client.py` surfaced two genuinely instructive tec
 A third, unrelated but equally real finding: `uv run` does not automatically load a project's `.env` file — a dependency (`python-dotenv`) can be correctly installed and completely unused if nothing in the code actually calls `load_dotenv()`. Worth checking explicitly, not assuming, when an API key "should" be available but isn't.
 
 Full technical write-up of a related, deliberately-deferred design question (conversation-history growth and cost scaling as `MAX_ITERATIONS` increases) lives in [`TECHNICAL_NOTES.md`](./TECHNICAL_NOTES.md).
+
+### Testing/tooling notes (2026-07-15 session)
+
+Building `test_tools.py` surfaced one genuinely instructive Python-mechanics detail worth keeping documented: **`inspect.signature()` on a `functools.partial` object automatically excludes the already-bound arguments** from the signature it reports. This matters here because `evaluate_model`/`train_model` get several arguments pre-bound by `build_dispatch_table` before Gemini ever sees them — the drift check therefore compares `TOOL_SCHEMAS` against the *bare*, unbound functions in `tools.py`, not the partial-bound versions in the dispatch table, since Gemini only ever fills in the parameters that are still open.
 
 ### Data Science Notes — cross-dataset smoke test (2026-07-10)
 
@@ -476,4 +547,5 @@ Project 5 of a 10-step learning roadmap: Linux → Git → Professional Python �
 1. **After `dataset.py`:** implement `trainer.py`'s real bodies, resolving `pos_label` per-dataset via `get_pos_label()`.
 2. **After `Trainer` storage/validation scaffolding:** fill in real fit/evaluate logic. Then `test_trainer.py`, then `gemini_client.py` and the real orchestration loop in `agent.py`.
 3. **As of 2026-07-10:** sklearn fit/evaluate logic and the `agent.py` train/test split + `validate_split` gate in place. `gemini_client.py` the explicit next milestone.
-4. **As of 2026-07-13 (current):** `gemini_client.py` is complete and verified via multiple real end-to-end runs on both datasets. Remaining before the project's next phase: wire `agent.py`'s actual orchestration loop (currently only exercised via a hand-built standalone script, not real `agent.py` code), then `test_tools.py` (the `inspect.signature()` drift check), then `test_trainer.py`, then `AGENTS.md`.
+4. **As of 2026-07-13:** `gemini_client.py` is complete and verified via multiple real end-to-end runs on both datasets. Remaining before the project's next phase: wire `agent.py`'s actual orchestration loop (currently only exercised via a hand-built standalone script, not real `agent.py` code), then `test_tools.py` (the `inspect.signature()` drift check), then `test_trainer.py`, then `AGENTS.md`.
+5. **As of 2026-07-15 (current):** `test_tools.py` complete — 11/11 passing, 20/20 across the full suite. **Next milestone: `agent.py`'s orchestration loop wiring** — deciding how `build_dispatch_table` should expose `(X, y)`/`initial_context` to the real loop, injecting an explicit optimization target into `initial_context` (the most actionable finding from `DATA_SCIENCE_ANALYSIS.md`), and deciding whether the human-in-the-loop hook gets built now or stays deferred. Recommended as its own dedicated session given its scope. Then `test_trainer.py`, then `AGENTS.md`.
