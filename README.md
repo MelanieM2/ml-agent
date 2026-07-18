@@ -1,18 +1,19 @@
 # ml-agent
 
-_Last updated: 2026-07-15_
+_Last updated: 2026-07-17_
 
 Agentic ML experimentation assistant — an LLM (Gemini) orchestrates dataset inspection, model proposal, training, and evaluation over scikit-learn via native function-calling, iterating toward a target metric in a supervised loop.
 
 **Status: in progress.** This is Project 5 in a 10-step self-directed learning roadmap toward Data Science / ML Engineering / Agentic AI.
 
 - `dataset.py` — ✅ done and tested.
-- `tools.py` — ✅ done (5 tool schemas + inclusive-bounds convention documented; `TOOL_FUNCTIONS` name→callable mapping added 2026-07-15, see "Project structure" below).
+- `tools.py` — ✅ done (5 tool schemas + inclusive-bounds convention documented; `TOOL_FUNCTIONS` name→callable mapping added 2026-07-15, now actively reused by `agent.py`'s dispatch-table wiring — see "Project structure" below).
 - `trainer.py` — ✅ done. Real sklearn fit/predict logic implemented: `train_model` fits the correct estimator per `model_type` via a registry lookup against `tools.py`'s schema; `evaluate_model` computes accuracy, precision, recall, f1, and a correctly-oriented confusion matrix using `pos_label`.
-- `agent.py` — owns the train/test split for a run: loads the dataset, performs a stratified `train_test_split`, runs a statistical validation gate (`validate_split`) before any model touches the data, and binds the resulting train/test arrays into `Trainer` via `functools.partial`. **The actual multi-step orchestration loop (calling Gemini, dispatching, feeding results back) is still not wired into `agent.py`** — that logic exists and works in `gemini_client.py`, but `agent.py` doesn't yet call it directly; see "Development Notes" below.
+- `agent.py` — ✅ **orchestration loop wired end-to-end (2026-07-17), verified via 3 real live runs.** `build_dispatch_table` now returns a `DispatchResult` (dispatch table + the run's `X`/`y`), and a new `run_session(dataset_name, optimization_target)` function connects it, `inspect_dataset`, and `gemini_client.run_agent_loop` into one real, callable entry point — see "`agent.py` — wiring the dispatch table" below.
 - `gemini_client.py` — ✅ **done and verified.** Implements the full agent loop: sends dataset context + tool schemas to Gemini, dispatches whichever tool call comes back, feeds results back, repeats until convergence or a max-iterations guard. Verified via multiple real end-to-end runs across both datasets (see "Data Science Notes" below).
 - `test_tools.py` — ✅ **done, 11 tests passing (2026-07-15).** The `TOOL_SCHEMAS` ↔ real-function signature drift check, using `inspect.signature()`. See "`test_tools.py` — the schema/function drift check" below.
-- Also not yet started: `test_trainer.py`, `AGENTS.md`.
+- Also not yet started: `test_trainer.py`, `AGENTS.md`, `main.py`'s real CLI loop.
+- **Planned, not yet built:** optional per-iteration logging inside `run_agent_loop`, so a run's full sequence of tool calls (not just the final decision) can be inspected after the fact — see "Data Science Notes" below for the finding that motivated this.
 
 ---
 
@@ -46,6 +47,7 @@ This same principle extends deeper into the codebase over time:
 - Into `tools.py`: **which class counts as "positive"** for a given dataset is also a fact, not a judgment call, and is never something Gemini supplies or guesses (see "Datasets" → "What `pos_label` actually is" below).
 - Into `trainer.py`: **whether a proposed model/hyperparameter combination is even valid** is likewise a fact checked deterministically — against `list_available_models()`'s own schema — before any training happens, rather than left for Gemini's arguments to be trusted blindly (see "Validating Gemini's arguments before training" below).
 - Into `tools.py`'s parameter-visibility convention (confirmed 2026-07-15, project-wide, not a one-off): **keyword-only parameters are always internally injected, never something Gemini supplies or sees.** `evaluate_model`'s `pos_label` is the canonical example — it sits after `*` in the signature and is deliberately absent from its `TOOL_SCHEMAS` entry, because which class is "positive" is a documented dataset fact, not something Gemini should ever be asked to guess.
+- Into `agent.py`'s `run_session` (new, 2026-07-17): **which class is "positive" is a fact, resolved once per dataset — but what metric to optimize for (recall, precision, accuracy) is a judgment call**, made once per *run*, not baked into the dataset registry alongside `pos_label`. This is why `optimization_target` is a plain parameter on `run_session`, not a dataset fact — see "`agent.py` — wiring the dispatch table" below for the full reasoning, and for what "optimizing for recall" concretely means on this project's primary dataset.
 
 ---
 
@@ -131,7 +133,7 @@ A key design decision, made explicit early rather than left implicit in code: na
               (max-iterations guard checked each pass)
 ```
 
-**Designed extension point:** a human-in-the-loop confirmation step (e.g. "approve this proposal before training?") slots in cleanly at the Category B → Category A handoff — between `record_model_proposal`'s return and `train_model`'s call — without requiring changes to either category's internals. **Not yet implemented; a `# TODO` marker sits at this exact point in `gemini_client.py`, deliberately deferred rather than built prematurely.**
+**Designed extension point:** a human-in-the-loop confirmation step (e.g. "approve this proposal before training?") slots in cleanly at the Category B → Category A handoff — between `record_model_proposal`'s return and `train_model`'s call — without requiring changes to either category's internals. **Not yet implemented; a `# TODO` marker sits at this exact point in `gemini_client.py`, deliberately deferred rather than built prematurely.** (Still open as of 2026-07-17 — this session wired the orchestration loop around this point without resolving the timing question itself.)
 
 The two Category B tools are worth a brief word each, since their names alone don't say much. `record_model_proposal` is how Gemini puts a candidate on the table — a model type, its hyperparameters, and the reasoning behind choosing them — without anything being trained yet. `record_convergence_decision` is the checkpoint after a model has actually been evaluated: Gemini looks at the metrics it just got back and states, explicitly, whether to stop here or try again, along with why.
 
@@ -183,7 +185,9 @@ Three checks, specifically:
 
 Keyword-only parameters (see the convention under "Core architectural principle" above) are excluded from all three checks, since they're never Gemini-visible in the first place.
 
-`TOOL_FUNCTIONS` — the name→callable mapping used by these checks — lives in `tools.py` itself, next to `TOOL_SCHEMAS` (not duplicated in the test file), so any future dispatch-table wiring in `agent.py` can reuse the same mapping rather than maintaining an equivalent one separately.
+`TOOL_FUNCTIONS` — the name→callable mapping used by these checks — lives in `tools.py` itself, next to `TOOL_SCHEMAS` (not duplicated in the test file), so any future dispatch-table wiring in `agent.py` can reuse the same mapping rather than maintaining an equivalent one separately. **As of 2026-07-17, this is no longer just a stated intention — `build_dispatch_table` genuinely reuses it, for the 3 of 5 tools that need no per-run binding; see "`agent.py` — wiring the dispatch table" below.**
+
+**Known follow-up, not yet built:** since `build_dispatch_table` now overrides 2 of `TOOL_FUNCTIONS`'s 5 entries by name (`train_model`, `evaluate_model`), a future rename of either function in `tools.py` would silently stop that override from working, with no error until a real run hit it. Extending this file's drift-check philosophy with an assertion that those two override keys still exist in `TOOL_FUNCTIONS` is planned but not implemented.
 
 **Result:** 11/11 passing, alongside the existing 9 in `test_dataset.py` (20/20 total).
 
@@ -239,7 +243,9 @@ Keyword-only parameters (see the convention under "Core architectural principle"
 - **`automatic_function_calling` is disabled.** If Gemini's own SDK executed functions directly, it would bypass `dispatch_table` entirely — meaning it would miss the real, per-run partial-bound `Trainer`/`X_train`/`y_train`/`pos_label` that `build_dispatch_table` sets up. Every tool call must go through `dispatch_table`, no exceptions.
 - **`TOOL_SCHEMAS` entries are wrapped explicitly into `FunctionDeclaration` objects** rather than passed as raw dicts, even though the SDK's Pydantic-based constructor accepts raw dicts fine at runtime via internal coercion — the explicit wrap avoids relying on undocumented behavior the SDK's own type stubs don't advertise.
 - **Conversation history uses `client.chats.create()`** (the SDK's own automatic history tracking) rather than manually assembled `types.Content` lists. Simplest available option; the trade-off (no manual control over pruning) is discussed in `TECHNICAL_NOTES.md`.
-- **Known limitation, not yet handled:** the loop assumes exactly one function call per Gemini turn. Gemini's function-calling mode can in principle return several parallel calls in a single response; this case isn't currently handled.
+- **Known limitation, not yet handled:** the loop assumes exactly one function call per Gemini turn. Gemini's function-calling mode can in principle return several parallel calls in a single response; this case isn't currently handled. **Still open as of 2026-07-17** — explicitly confirmed out of scope for that session's orchestration wiring, not silently dropped.
+- **Known limitation, not yet handled:** `record_convergence_decision`'s result is not echoed back to Gemini when the loop stops (`continue_iterating=False`) — the loop just returns. **Also still open as of 2026-07-17**, same status as above.
+- **Planned, not yet built (requested 2026-07-17):** optional per-iteration logging of each tool call (name, arguments, result), motivated by a real analysis gap — see "Data Science Notes" below.
 
 ### `client.chats.create()` — internal dynamics
 
@@ -336,8 +342,9 @@ Everything dataset-specific (which `pos_label` applies) and run-specific (the tr
 ```python
 def build_dispatch_table(
     dataset_name: str, random_state: int = 42
-) -> dict[str, Callable[..., Any]]:
-    """Builds one run's complete tool dispatch table for gemini_client.py."""
+) -> DispatchResult:
+    """Builds one run's complete tool dispatch table for gemini_client.py,
+    plus the (X, y) that table was built from."""
     X, y = load_dataset(dataset_name)
     pos_label = get_pos_label(dataset_name)
 
@@ -352,36 +359,62 @@ def build_dispatch_table(
         trainer.evaluate_model, X_test=X_test, y_test=y_test, pos_label=pos_label
     )
 
-    return {
-        "list_available_models": list_available_models,
+    dispatch_table = {
+        **TOOL_FUNCTIONS,
         "train_model": bound_train,
         "evaluate_model": bound_evaluate,
-        "record_model_proposal": record_model_proposal,
-        "record_convergence_decision": record_convergence_decision,
     }
+
+    return DispatchResult(dispatch_table=dispatch_table, X=X, y=y)
 ```
 
-Note the asymmetry visible directly in the dict: some entries are bound/wrapped (`bound_train`, `bound_evaluate`), some are bare top-level functions (`list_available_models`, both Category B tools). That asymmetry *is* the Category A/B split, made concrete in code rather than only described in prose.
+Note the asymmetry visible directly in the dict spread: 3 of 5 entries come straight from `TOOL_FUNCTIONS` (`tools.py`'s own name→callable mapping) unchanged; 2 are overridden with `functools.partial`-bound versions built here, since only `build_dispatch_table` has the real per-run training data those two need. That asymmetry *is* the Category A/B split, made concrete in code rather than only described in prose.
 
-### The `pos_label` / split-array binding mechanism: `functools.partial`
+### `DispatchResult`: why `build_dispatch_table`'s return type changed (2026-07-17)
 
-Binding `pos_label`, `X_train`, `y_train`, etc. into `Trainer`'s methods is an instance of **partial function application** — pre-loading a function with specific arguments so it can be saved and called later without those arguments needing to be supplied again.
+Before this session, `build_dispatch_table` returned only the dispatch dict — meaning any caller needing the same `(X, y)` it had already loaded (to build `initial_context` via `inspect_dataset`) had to call `load_dataset` a second time. For Climate Crashes specifically, this meant a second OpenML network fetch per run, not just wasted CPU.
 
-```
-CANDIDATE 1 — functools.partial (chosen)            CANDIDATE 2 — closure (not used, but a
-                                                      real alternative worth knowing)
- bound_evaluate = partial(                           def make_evaluate_dispatch(trainer, pos_label):
-     trainer.evaluate_model,                             def _dispatch(model_ref):
-     pos_label=pos_label,                                     return trainer.evaluate_model(
-     X_test=X_test, y_test=y_test                                 model_ref, pos_label=pos_label)
- )                                                        return _dispatch
+```python
+@dataclass(frozen=True)
+class DispatchResult:
+    dispatch_table: dict[str, Callable[..., Any]]
+    X: pd.DataFrame
+    y: pd.Series
 ```
 
-**Why `partial` here specifically:** the freezing needed is only ever a handful of arguments, with no additional behavior wrapped around the call — no logging, no transformation, no conditionals. That is precisely the case `functools.partial` is built for. (If a future requirement ever needs extra logic around the call — e.g. catching a specific exception type before it reaches Gemini's dispatch — that would be the signal to switch to the closure form instead; not a current need.)
+Deliberately narrow — it carries `(X, y)` and the dispatch table only, **not** a formed prompt string. Prompt assembly stays outside this function (see `run_session` below), so `build_dispatch_table`'s own job stays exactly what its docstring already committed it to: resolving what's dataset- and run-specific, not writing prompts. Shaped as a frozen dataclass, matching this project's existing convention for named, self-documenting return values (`DatasetSpec` in `dataset.py` is the precedent).
 
-### What's genuinely still missing: the orchestration loop itself
+### `run_session`: the orchestration entry point (2026-07-17)
 
-`build_dispatch_table` builds the dispatch table correctly and does **not** return `(X, y)` or an `initial_context` — meaning nothing in the committed codebase yet calls `run_agent_loop` with real, non-hand-built inputs. This is `agent.py`'s own documented next step, not an oversight discovered this session — see "Roadmap context" below.
+The piece that was missing until this session — everything it calls already existed and worked in isolation; nothing previously called them together with real, non-hand-built inputs in the committed codebase.
+
+```python
+def run_session(
+    dataset_name: str,
+    optimization_target: str,
+    *,
+    random_state: int = 42,
+    model: str = DEFAULT_MODEL,
+    max_iterations: int = MAX_ITERATIONS,
+) -> dict[str, Any]:
+    result = build_dispatch_table(dataset_name, random_state=random_state)
+    facts = inspect_dataset(result.X, result.y)
+    initial_context = _format_initial_context(facts, optimization_target)
+    return run_agent_loop(
+        result.dispatch_table, initial_context,
+        model=model, max_iterations=max_iterations,
+    )
+```
+
+**`optimization_target` is a plain parameter, deliberately not hardcoded per dataset.** This preserves the same fact-vs-judgment separation already applied to `pos_label` elsewhere in this project (see "Core architectural principle" above): which class is "positive" is a documented fact, resolved once per dataset; what to optimize for is a judgment call, made once per *run*, by whoever calls `run_session`.
+
+**What "optimizing for recall" concretely means, on this project's primary dataset:** on Climate Crashes, `pos_label=1` marks a *simulation failure* — the rare (~8.5%), undesirable outcome. Optimizing for recall there means minimizing how many real crashes slip through undetected, even if that means more false alarms (flagging a run as risky when it would've been fine). The alternative, precision, asks the opposite question: of everything the model flagged as a crash, how many actually were one. Which one matters more is a judgment call that depends on which mistake is more costly in context — missing a real crash, vs. chasing a false alarm. This is exactly the judgment `optimization_target` exists to make explicit, rather than leaving it for Gemini to guess at (see "Data Science Notes" below for what happened when it wasn't stated).
+
+`run_session` never calls `input()` — it stays directly callable with a hardcoded string, no interactive I/O to mock in a future test. Whichever CLI entry point is eventually built (`main.py`, not started) is responsible for actually asking the person what to optimize for.
+
+### What's genuinely still missing
+
+The orchestration loop itself is now wired and verified (see "Data Science Notes" below for 3 live runs). What remains open: the human-in-the-loop hook (deferred, timing not decided this session either), the two `gemini_client.py` limitations noted above (single-call-per-turn, convergence result not echoed on stop), per-iteration logging (planned, not built), and `main.py`'s real interactive CLI loop.
 
 ---
 
@@ -400,17 +433,17 @@ CANDIDATE 1 — functools.partial (chosen)            CANDIDATE 2 — closure (n
 ├── README.md
 ├── SECURITY.md
 ├── TECHNICAL_NOTES.md
-├── main.py                 # CLI entry point / interactive loop
+├── main.py                 # CLI entry point / interactive loop — not yet written
 ├── ml_agent/
 │   ├── __init__.py
-│   ├── agent.py             # ✅ dispatch-table + split wiring done; orchestration loop still pending
+│   ├── agent.py             # ✅ orchestration loop wired end-to-end (2026-07-17)
 │   ├── dataset.py           # ✅ done — dataset-agnostic loading + inspection
 │   ├── gemini_client.py     # ✅ done — Gemini client + function-call dispatch loop, verified
 │   ├── tools.py              # ✅ done — Gemini function-calling tool schemas + TOOL_FUNCTIONS
 │   └── trainer.py            # ✅ done — storage, validation, and real sklearn fit/predict/evaluate
 ├── pyproject.toml
-├── run_smoke_test.py         # hand-built end-to-end exercise of run_agent_loop; gitignored
-├── smoke_test.py             # isolated schema-construction check, no API key/network; gitignored
+├── run_smoke_test.py         # manual live-API smoke test of run_session(); gitignored
+├── smoke_test.py              # isolated schema-construction check, no API key/network; gitignored
 ├── tests/
 │   ├── __init__.py
 │   ├── test_dataset.py       # ✅ done, 9 passing tests
@@ -470,7 +503,13 @@ Dependencies are pinned exactly (`add-bounds = "exact"` in `[tool.uv]`) and rest
 uv run python main.py
 ```
 
-(Interactive loop entry point — details to be filled in as `agent.py`'s orchestration wiring is completed.)
+(Interactive loop entry point — not yet written; `main.py`'s job is to prompt for a dataset and an optimization target, then call `agent.py`'s `run_session`.)
+
+For a manual, real-API smoke test of the orchestration loop in the meantime:
+
+```bash
+uv run python run_smoke_test.py
+```
 
 ## Testing
 
@@ -512,6 +551,12 @@ Full technical write-up of a related, deliberately-deferred design question (con
 
 Building `test_tools.py` surfaced one genuinely instructive Python-mechanics detail worth keeping documented: **`inspect.signature()` on a `functools.partial` object automatically excludes the already-bound arguments** from the signature it reports. This matters here because `evaluate_model`/`train_model` get several arguments pre-bound by `build_dispatch_table` before Gemini ever sees them — the drift check therefore compares `TOOL_SCHEMAS` against the *bare*, unbound functions in `tools.py`, not the partial-bound versions in the dispatch table, since Gemini only ever fills in the parameters that are still open.
 
+### Orchestration wiring notes (2026-07-17 session)
+
+Wiring `agent.py`'s real orchestration loop for the first time surfaced one design question worth documenting: `build_dispatch_table`'s return type needed to change (to also expose `(X, y)`, avoiding a second `load_dataset` call — see "`agent.py`" above), which raised the question of *where* the newly-required data should live. The choice made — a narrow `DispatchResult` carrying just `(X, y)` and the dispatch table, with prompt assembly kept as a separate caller-side step — was deliberately the smaller of two possible signature changes, favoring keeping `build_dispatch_table`'s job narrow over folding prompt construction into it as well.
+
+Reusing `tools.py`'s `TOOL_FUNCTIONS` mapping for 3 of the dispatch table's 5 entries (rather than hand-building all 5, as before) closes an explicitly-flagged open question from the 2026-07-15 session, but introduces a small, documented risk: if `train_model`/`evaluate_model` are ever renamed in `tools.py`, the 2 override entries would silently stop overriding, undetected until a real run hit it. A test extending `test_tools.py`'s drift-check philosophy to guard against this is planned, not yet built.
+
 ### Data Science Notes — cross-dataset smoke test (2026-07-10)
 
 Two datasets are used deliberately for their **opposite class semantics**: Climate Crashes' `pos_label=1` marks a rare (8.5%), *undesirable* outcome (simulation failure), while Breast Cancer's `pos_label=1` marks a majority (62.7%), *desirable* outcome (benign). This asymmetry is a real risk for any code that computes a confusion matrix or class-conditional metrics: an implementation that silently assumes "positive = rare" or "positive = bad" will produce a subtly wrong result on one dataset while looking correct on the other.
@@ -529,6 +574,12 @@ Two datasets are used deliberately for their **opposite class semantics**: Clima
 **What this confirms about the implementation specifically:** the confusion matrix is computed with an explicit label ordering (`labels=[1 - pos_label, pos_label]`) rather than relying on `sklearn`'s default ascending sort, which would silently assume class `0` is always "negative" — true for Climate Crashes but false for Breast Cancer. Running both datasets through the same code path confirmed this ordering logic holds in both directions.
 
 A much more extensive live-agent version of this cross-dataset comparison — six real end-to-end Gemini-orchestrated runs, convergence-rate differences, and a concrete finding about how an unstated optimization target affects model selection differently per dataset — is written up in full in [`DATA_SCIENCE_ANALYSIS.md`](./DATA_SCIENCE_ANALYSIS.md).
+
+### Data Science Notes — orchestration wiring goes live (2026-07-17)
+
+With `run_session` wired end-to-end, the optimization-target finding above was acted on for the first time and tested against a live agent: 3 real runs, Climate Crashes, `optimization_target="recall"`. All 3 independently converged on an SVM (`class_weight="balanced"`) with recall = 1.0, each explicitly reasoning about the stated target — a direct, sharp contrast with the earlier finding that, without a stated target, the agent consistently traded recall away for a different metric. This is real, if preliminary (n=3, one dataset, one target), evidence the fix changes agent behavior in the intended direction.
+
+That said, recall = 1.0 came with low, largely unexamined precision in all three runs — worth a skeptical read, not treated as an unambiguous win: a model can reach perfect recall on a very small rare-class test set (9 examples) simply by predicting the positive class liberally. Whether "recall at any precision cost" is the right trade-off is a human judgment call the current single-metric target doesn't ask the agent to weigh. Full write-up, including the specific per-run numbers and an open question about run-to-run iteration-count variation that can't currently be answered without per-iteration logging, is in [`DATA_SCIENCE_ANALYSIS.md`](./DATA_SCIENCE_ANALYSIS.md) §8.
 
 ### Statistical rationale — `validate_split`'s threshold
 
@@ -548,4 +599,5 @@ Project 5 of a 10-step learning roadmap: Linux → Git → Professional Python �
 2. **After `Trainer` storage/validation scaffolding:** fill in real fit/evaluate logic. Then `test_trainer.py`, then `gemini_client.py` and the real orchestration loop in `agent.py`.
 3. **As of 2026-07-10:** sklearn fit/evaluate logic and the `agent.py` train/test split + `validate_split` gate in place. `gemini_client.py` the explicit next milestone.
 4. **As of 2026-07-13:** `gemini_client.py` is complete and verified via multiple real end-to-end runs on both datasets. Remaining before the project's next phase: wire `agent.py`'s actual orchestration loop (currently only exercised via a hand-built standalone script, not real `agent.py` code), then `test_tools.py` (the `inspect.signature()` drift check), then `test_trainer.py`, then `AGENTS.md`.
-5. **As of 2026-07-15 (current):** `test_tools.py` complete — 11/11 passing, 20/20 across the full suite. **Next milestone: `agent.py`'s orchestration loop wiring** — deciding how `build_dispatch_table` should expose `(X, y)`/`initial_context` to the real loop, injecting an explicit optimization target into `initial_context` (the most actionable finding from `DATA_SCIENCE_ANALYSIS.md`), and deciding whether the human-in-the-loop hook gets built now or stays deferred. Recommended as its own dedicated session given its scope. Then `test_trainer.py`, then `AGENTS.md`.
+5. **As of 2026-07-15:** `test_tools.py` complete — 11/11 passing, 20/20 across the full suite. Next milestone: `agent.py`'s orchestration loop wiring — deciding how `build_dispatch_table` should expose `(X, y)`/`initial_context` to the real loop, injecting an explicit optimization target into `initial_context`, and deciding whether the human-in-the-loop hook gets built now or stays deferred. Recommended as its own dedicated session given its scope.
+6. **As of 2026-07-17 (current):** `agent.py`'s orchestration loop is wired end-to-end and verified via 3 live runs (`build_dispatch_table` → `DispatchResult` → `run_session` → `run_agent_loop`). The optimization-target injection is built and confirmed working against a live agent. **Not resolved this session:** the human-in-the-loop hook's timing (still deferred, undecided either way — not the same as "rejected"). **New, explicitly requested:** per-iteration logging inside `run_agent_loop`, to support deeper run-to-run analysis — planned for a future session. Next up: that logging feature, the `TOOL_FUNCTIONS`-rename test safeguard, then `test_trainer.py`, then `AGENTS.md`, then `main.py`'s real CLI loop.
