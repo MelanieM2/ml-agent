@@ -8,6 +8,9 @@ n=5 and n=2 are not large enough to support strong statistical claims; this
 is an observational analysis of real agent behavior, not a controlled
 experiment._
 
+_Updated 2026-07-17 — see §8 for new findings from the first 3 live runs
+made possible by that session's orchestration-loop wiring._
+
 ---
 
 ## 1. The dataset asymmetry this analysis depends on
@@ -135,7 +138,7 @@ problem as might otherwise be assumed. A real, if minor, fix candidate:
 raise `max_iter`, scale input features, or expose `max_iter` as a tunable
 hyperparameter in `list_available_models`'s schema.
 
-## 7. Summary
+## 7. Summary (as of 2026-07-13)
 
 | Question | Answer, with appropriate caveats |
 |---|---|
@@ -144,9 +147,102 @@ hyperparameter in `list_available_models`'s schema.
 | Is the loop's non-determinism a bug? | No — expected LLM behavior — but it may be partly conflated with insufficient iteration budget; genuinely unresolved by current data. |
 | Is the `ConvergenceWarning` dataset-specific? | No — confirmed present across both datasets, appears tied to `LogisticRegression`'s own default settings. |
 
+---
+
+## 8. Update, 2026-07-17: the optimization-target fix, tested for the first time against a live agent
+
+The 2026-07-17 session wired `agent.py`'s orchestration loop end-to-end
+for the first time (`build_dispatch_table` → `run_session` →
+`gemini_client.run_agent_loop`) and, as part of that work, directly acted
+on §4's finding above: `initial_context` now states an explicit
+`optimization_target` (see `README.md`'s "Core architectural principle"
+section, and `TECHNICAL_NOTES.md` §"2026-07-17" for the implementation).
+This section reports the first real evidence of what that fix actually
+does to agent behavior — 3 live runs, Climate Crashes only,
+`optimization_target="recall"`, via the new `run_smoke_test.py`.
+
+### 8.1 Results
+
+| Run | Model chosen | Recall | Precision | Iterations | `max_iterations` | `ConvergenceWarning`? |
+|---|---|---|---|---|---|---|
+| 1 | SVM, `class_weight="balanced"` | 1.0 | low (unspecified exact value) | 10 | 15 | Yes (Logistic Regression) |
+| 2 | SVM, `class_weight="balanced"` | 1.0 | low (unspecified exact value) | 10 | 15 | Yes (Logistic Regression) |
+| 3 | SVM, `C=0.1`, `class_weight="balanced"` | 1.0 | low (unspecified exact value) | 8 | 15 | No |
+
+n=3, all Climate Crashes, all same `optimization_target`. Not yet run
+against Breast Cancer or a different target (e.g. `"precision"`) — both
+flagged as natural next data points, not done this session.
+
+### 8.2 Finding: the fix worked, directly and repeatably — a genuine before/after contrast with §4
+
+All three runs independently converged on an SVM with
+`class_weight="balanced"` achieving **recall = 1.0**, with each run's own
+`record_convergence_decision` reasoning explicitly referencing the stated
+target (e.g. *"achieved a recall of 1.0, which is the maximum possible for
+this metric... meets the requirement of optimizing for recall"*). This is
+a direct, sharp contrast with §4's pre-fix findings, where three separate
+Climate runs each independently traded recall *away* for a different
+metric, with no stated target to anchor the decision. Three independent
+post-fix runs landing on the same recall-maximizing conclusion, using
+consistent language tied to the stated target, is real evidence the fix
+changes agent behavior in the intended direction — not just that the
+prompt text changed.
+
+### 8.3 Caveat: recall = 1.0 deserves a skeptical read, not just acceptance as "the fix working perfectly"
+
+All three runs also report **low precision**, and the agent's own
+reasoning acknowledges this without really interrogating it — e.g. run 3's
+reasoning states *"this is expected given the extreme imbalance and the
+focus on recall"* and treats that as sufficient justification. With
+`class_weight="balanced"` and a very small rare-class test set (9 examples,
+per `validate_split`'s threshold-of-5 reasoning — see `README.md`
+"Statistical rationale"), a model can sometimes reach perfect recall simply
+by predicting the positive class liberally, catching every real case at
+the cost of many false alarms. Whether "recall at any precision cost" is
+actually the *right* trade-off for this problem is a human judgment call,
+not something the current setup asks the agent to weigh — the fix
+successfully made the agent optimize for exactly what was asked, but
+"exactly what was asked" may itself be too blunt an instruction. A natural
+follow-up (not built this session): a richer target that also expresses a
+precision floor or an explicit cost ratio between false negatives and
+false positives, rather than a single bare metric name.
+
+### 8.4 Open question: run-to-run variation in iteration count and `ConvergenceWarning`, unresolved without logging
+
+Run 3 converged in 8 iterations with no `ConvergenceWarning` at all, versus
+10 iterations with the warning present in runs 1 and 2. This could mean
+Logistic Regression wasn't proposed in run 3, or was proposed with
+different hyperparameters that avoided the 100-iteration cap — but this
+can't be confirmed from the final printed result alone, since
+`run_agent_loop` currently returns only the final decision, not the full
+per-iteration proposal/evaluation history.
+
+**This is now a planned, explicitly requested piece of future work**:
+optional logging of each iteration's tool call (name + arguments + result)
+inside `run_agent_loop`, so questions like this one can be answered
+directly from a run's log rather than left as an open question. Not built
+this session — flagged for a future session, see `context_ml-agent_2026-07-17.md`.
+
+### 8.5 Minor, non-technical observation
+
+Run 3's `next_step_hint` field contained two missing-space typos
+(`"optimalrecall"`, `"mosteffective"`) — this is Gemini's own free-text
+output, passed through verbatim by `record_convergence_decision`, not a
+defect in any project code. Noted for completeness, not actionable.
+
+### 8.6 Updated summary table
+
+| Question | Answer, with appropriate caveats |
+|---|---|
+| Does stating an explicit optimization target change agent behavior? | Yes — 3/3 post-fix runs converged on the recall-maximizing model with reasoning explicitly tied to the stated target, versus 3/3 pre-fix runs (§4) that traded recall away with no target to anchor the decision. n=3 vs. n=3, same caveats about sample size apply as elsewhere in this document. |
+| Is recall = 1.0 unambiguously the "right" answer? | Not necessarily — precision was low in all 3 runs and largely unexamined by the agent's own reasoning. The fix delivers what was asked, which may itself need refining (e.g. a stated precision floor or explicit cost ratio) rather than a bare metric name. |
+| Can today's data explain the iteration-count/warning variation between runs? | No — this requires per-iteration logging, not yet built. Flagged as planned future work. |
+
+---
+
 This analysis is intentionally kept separate from `README.md` (which
-carries only the compact summary table from the earlier synthetic
-cross-dataset smoke test) and from `TECHNICAL_NOTES.md` (which covers an
-unrelated, purely architectural question about conversation-history cost
-scaling) — this file is specifically the methodology/data-science-layer
-findings from real, live agent runs.
+carries only a compact summary, linking back here for full detail) and
+from `TECHNICAL_NOTES.md` (which covers the architectural/implementation
+side of each session's work, not live-run findings) — this file is
+specifically the methodology/data-science-layer findings from real, live
+agent runs.
