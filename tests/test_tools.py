@@ -97,3 +97,16 @@ def test_every_schema_has_a_registered_function():
     tool added to TOOL_SCHEMAS but never wired into TOOL_FUNCTIONS above,
     or vice versa (a callable Gemini could never actually reach)."""
     assert {s["name"] for s in TOOL_SCHEMAS} == set(TOOL_FUNCTIONS)
+
+
+def test_dispatch_table_override_keys_exist():
+    """agent.py's build_dispatch_table overrides exactly two TOOL_FUNCTIONS
+    entries by literal string key:
+        {**TOOL_FUNCTIONS, "train_model": bound_train,
+         "evaluate_model": bound_evaluate}
+    This doesn't import agent.py (keeps this file's dependencies as they
+    are) - it just guards the two key names agent.py's override relies on
+    existing here, so a rename in tools.py surfaces at test time instead
+    of silently at the next live run."""
+    assert "train_model" in TOOL_FUNCTIONS
+    assert "evaluate_model" in TOOL_FUNCTIONS
