@@ -8,6 +8,7 @@ continue_iterating=False) or MAX_ITERATIONS is reached.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any, Callable
 
 from google import genai
@@ -27,7 +28,8 @@ def run_agent_loop(
     initial_context: str,
     *,
     model: str = DEFAULT_MODEL,
-    max_iterations:  int = MAX_ITERATIONS,  
+    max_iterations:  int = MAX_ITERATIONS,
+    log_iterations: bool = False,
 ) -> dict[str, Any]:
     """
     Runs the Gemini-orchestrated model-search loop against an
@@ -39,8 +41,20 @@ def run_agent_loop(
     deliberately knows nothing about datasets, splits, or pos_label; it
     only knows how to talk to Gemini and dispatch whatever tool name
     comes back).
+
+    log_iterations: off by default (False). When True, every iteration
+    is recorded — tool name, tool arguments, result, and a UTC
+    timestamp — including the case where Gemini replies with plain text
+    instead of a tool call (tool_name/tool_args/result are None on that
+    kind of entry; response_text is populated instead). The full list is
+    returned under this function's result dict, keyed "log", only when
+    log_iterations=True — callers that don't ask for it see no change
+    in the returned dict's shape. Nothing is written to disk here; if
+    you want the log to persist across runs, the caller is responsible
+    for doing something with result["log"] itself.
     """
     client = genai.Client()
+    log: list[dict[str, Any]] = []
 
     # automatic_function_calling is disabled on purpose: if Gemini's own
     # SDK executed functions directly, it would bypass dispatch_table
@@ -79,11 +93,23 @@ def run_agent_loop(
             # as the loop ending without a formal convergence decision
             # (e.g. an early stray text reply). Not necessarily an error,
             # but worth agent.py's caller knowing it happened this way.
-            return {
+            if log_iterations:
+                log.append({
+                    "iteration": iteration,
+                    "tool_name": None,
+                    "tool_args": None,
+                    "result": None,
+                    "response_text": response.text,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                })
+            outcome = {
                 "status": "stopped_without_convergence_call",
                 "final_text": response.text,
                 "iterations": iteration,
             }
+            if log_iterations:
+                outcome["log"] = log
+            return outcome
 
         # Judgment call, flagging explicitly: this assumes exactly one
         # function_call per Gemini turn. TOOL_SCHEMAS/dispatch_table are
@@ -103,9 +129,22 @@ def run_agent_loop(
 
         result = dispatch_table[tool_name](**tool_args)
 
+        if log_iterations:
+            log.append({
+                "iteration": iteration,
+                "tool_name": tool_name,
+                "tool_args": tool_args,
+                "result": result,
+                "response_text": None,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            })
+
         if tool_name == "record_convergence_decision" and not tool_args.get("continue_iterating", False):
             # Gemini decided to stop — report the outcome and end the loop.
-            return {"status": "converged", "decision": result, "iterations": iteration}
+            outcome = {"status": "converged", "decision": result, "iterations": iteration}
+            if log_iterations:
+                outcome["log"] = log
+            return outcome
 
         if tool_name == "record_model_proposal":
             # TODO: human-in-the-loop hook goes here — between
@@ -128,4 +167,30 @@ def run_agent_loop(
         response = chat.send_message(function_response_part)
 
     # Exhausted max_iterations without a convergence decision either way.
-    return {"status": "max_iterations_reached", "iterations": max_iterations}
+    outcome = {"status": "max_iterations_reached", "iterations": max_iterations}
+    if log_iterations:
+        outcome["log"] = log
+    return outcome
+
+
+def format_log(log: list[dict[str, Any]]) -> str:
+    """Human-readable rendering of run_agent_loop's log entries (the
+    list returned under result["log"] when log_iterations=True) — one
+    block per iteration, separated for easy scanning in a terminal or
+    a pasted-in doc. Purely a display helper; does not touch or
+    reinterpret the log's actual data, so it stays safe to call from
+    anywhere that has a log list in hand — run_smoke_test.py today,
+    potentially main.py or other callers later.
+    """
+    blocks = []
+    for entry in log:
+        lines = [f"=== Iteration {entry['iteration']} ({entry['timestamp']}) ==="]
+        if entry["tool_name"] is not None:
+            lines.append(f"tool: {entry['tool_name']}")
+            lines.append(f"args: {entry['tool_args']}")
+            lines.append(f"result: {entry['result']}")
+        else:
+            lines.append("(no tool call — plain text response)")
+            lines.append(f"response_text: {entry['response_text']}")
+        blocks.append("\n".join(lines))
+    return "\n\n".join(blocks)

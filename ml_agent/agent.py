@@ -217,6 +217,7 @@ def run_session(
     random_state: int = 42,
     model: str = DEFAULT_MODEL,
     max_iterations: int = MAX_ITERATIONS,
+    log_iterations: bool = False,
 ) -> dict[str, Any]:
     """Runs one full agent session end-to-end: builds the dispatch table
     and dataset facts, assembles the first prompt, then hands off to
@@ -239,6 +240,11 @@ def run_session(
     responsible for actually asking the person what to optimize for and
     passing the answer in here.
 
+    log_iterations: off by default (False), passed straight through to
+    run_agent_loop unchanged -- see that function's docstring for what
+    gets logged. run_session makes no logging decisions of its own; it
+    just forwards the caller's choice.
+
     Does NOT touch either open 07-13 judgment call (single-function-
     call-per-turn assumption; record_convergence_decision's result not
     echoed back on stop) -- both live entirely inside run_agent_loop,
@@ -254,8 +260,8 @@ def run_session(
         initial_context,
         model=model,
         max_iterations=max_iterations,
+        log_iterations=log_iterations,
     )
-
 
 # Still open, unchanged by this session (deferred deliberately -- see
 # Step 2.5 discussion): the human-in-the-loop extension point, inside
