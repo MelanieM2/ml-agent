@@ -226,11 +226,33 @@ would silently stop overriding anything — the stale, `NotImplementedError`
 undetected until a real run hit it (no import error, no exception until
 the tool is actually called by Gemini).
 
-**Mitigation, planned but not built this session:** extend
-`test_tools.py`'s existing drift-check philosophy with an assertion that
-`build_dispatch_table`'s two override keys still exist in `TOOL_FUNCTIONS`
-— would catch a rename at test time instead of runtime. Tracked as a
-follow-up item, not implemented 2026-07-17.
+**Correction (2026-07-19):** this risk description flagged above turned out to be
+inaccurate. `agent.py`'s override uses **literal string keys**
+(`"train_model"`, `"evaluate_model"`), not a lookup into
+`TOOL_FUNCTIONS` — so a key rename inside `TOOL_FUNCTIONS` cannot affect
+whether the override happens; `agent.py` always writes those two keys
+into the final dispatch table regardless of `TOOL_FUNCTIONS`'s own
+contents. **The override cannot silently fail from this specific
+cause.** The actual failure mode that *can* happen from a rename —
+`TOOL_SCHEMAS` declaring a tool name no longer present in
+`TOOL_FUNCTIONS` — is already caught, at test time, by the pre-existing
+`test_every_schema_has_a_registered_function` in `test_tools.py`. This
+isn't a newly-closed gap; it's existing coverage that this section
+didn't credit correctly when originally describing the risk. See Part 3,
+§3.1 for the test added 2026-07-19, which reinforces/documents this
+concern by name rather than closing a previously-open gap.
+
+**Mitigation, planned but not implemented on session 2026-07-17.**
+Extend `test_tools.py`'s existing drift-check philosophy with an
+assertion that `build_dispatch_table`'s two override keys still exist in
+`TOOL_FUNCTIONS` — would catch a rename at test time instead of runtime.
+Tracked as a follow-up item.
+
+**Update (2026-07-19):** built — see Part 3, §3.1. Per the correction
+above, though, this ended up reinforcing existing coverage rather than
+closing a gap that genuinely existed — worth keeping in mind before
+reading this as "problem solved," since the underlying risk this
+paragraph originally described wasn't real to begin with.
 
 ### 2.3 Optimization target: explicit parameter, not hardcoded
 
@@ -336,3 +358,132 @@ Melanie has requested this as a future capability — optional logging of
 each iteration's tool call (name, arguments, result) inside
 `run_agent_loop` — flagged here as planned future work, not implemented
 2026-07-17. See `context_ml-agent_2026-07-17.md` for next-session framing.
+
+
+<!--
+TECHNICAL_NOTES.md ADDITION — 2026-07-19 session
+-->
+
+---
+## Part 3: Per-iteration logging in `run_agent_loop` (2026-07-19)
+
+_Status: IMPLEMENTED and verified via 1 live run (see
+`DATA_SCIENCE_ANALYSIS.md` §9). Directly addresses the future-work item
+named at the end of Part 2, §2.6._
+
+### 3.1 `TOOL_FUNCTIONS`-rename test
+
+`test_dispatch_table_override_keys_exist()` added to `test_tools.py`,
+asserting `"train_model"` and `"evaluate_model"` exist as keys in
+`TOOL_FUNCTIONS`. See the correction note above for why this is
+reinforcing existing coverage rather than closing a real gap — retained
+regardless, as cheap, explicit documentation of the concern by name.
+21/21 tests passing after this addition.
+
+### 3.2 `log_iterations` parameter: design and rationale
+
+**The problem.** `run_agent_loop` returned only the final
+decision/status — no record of intermediate proposals, evaluations, or
+rejections. `DATA_SCIENCE_ANALYSIS.md` §8.4 identified a concrete
+question this made unanswerable: why did one run converge faster, with
+no `ConvergenceWarning`, than another run under identical setup.
+
+**The fix.** A new keyword-only parameter, `log_iterations: bool =
+False`, added to both `run_agent_loop` and `run_session` (the latter
+simply forwards it unchanged — makes no logging decisions of its own).
+Opt-in, matching this project's existing default-off convention
+elsewhere (`class_weight=None`, `next_step_hint=""`).
+
+When enabled, each loop iteration appends one entry to a local `log:
+list[dict[str, Any]]`, with a **consistent key set across every entry
+regardless of branch**:
+
+```python
+{
+    "iteration": int,
+    "tool_name": str | None,       # None only on the no-function-call branch
+    "tool_args": dict | None,      # None only on the no-function-call branch
+    "result": Any | None,          # None only on the no-function-call branch
+    "response_text": str | None,   # populated only on the no-function-call branch
+    "timestamp": str,              # UTC, ISO 8601, via datetime.now(timezone.utc).isoformat()
+}
+```
+
+**Why a consistent key set, rather than only including applicable
+keys.** A design choice, not the only reasonable one: keeping every
+entry the same shape means `pd.DataFrame(log)` produces a fully
+rectangular table immediately, with no `NaN`-filling or `KeyError`-prone
+`entry["tool_name"]` access needed when iterating by hand. The trade-off
+is a few `None` values sitting in fields that don't apply to a given
+entry — judged a reasonable cost for that convenience, not treated as
+the only defensible option.
+
+**Attachment to the return dict.** `run_agent_loop` has exactly three
+`return` statements (confirmed directly against the real file's line
+numbers: 82, 108, 131 — not assumed from memory). Each independently
+gets `outcome["log"] = log` attached, guarded by `if log_iterations`, so
+the return dict's shape is completely unchanged for any caller that
+doesn't ask for logging. This is deliberately repeated three times
+rather than centralized, since Python has no single "on any return"
+hook — a real maintenance note for future editors: **any new early-exit
+branch added to this function later needs the same `if log_iterations:
+...["log"] = log` line added explicitly, or logging will silently stop
+being attached on that one path** while continuing to work everywhere
+else — a failure mode that wouldn't raise an error, just quietly return
+an incomplete result.
+
+### 3.3 `format_log()`: shared display utility
+
+Added directly in `gemini_client.py` (not local to any one caller) so it
+can be reused by anything that ends up with a `log` list in hand later
+— today, that's `run_smoke_test.py`; potentially `main.py` or other
+future callers. Purely a rendering function — takes the log list,
+returns a string, does not read or modify anything else, does not touch
+`run_agent_loop`'s internals:
+
+```python
+def format_log(log: list[dict[str, Any]]) -> str:
+    ...
+    # renders "=== Iteration N (timestamp) ===" blocks, one per entry
+```
+
+### 3.4 `run_smoke_test.py`: consumption pattern (not committed — file is gitignored)
+
+Two changes, both presentation/persistence only, no changes to any
+committed package code beyond the `log_iterations=True` call itself:
+
+1. Printing switched from a raw `print(result)` to a short status line
+   plus `format_log(result["log"])`, for terminal readability.
+2. The full `result` dict (not just `result["log"]`) is written as raw
+   JSON to `results/smoke_test_log.json` on every run where
+   `log_iterations=True`, **overwriting** the file each time rather than
+   appending. Deliberate: individual agent runs are not reproducible, so
+   there is no meaningful continuous "history" to preserve in this
+   particular file; anyone wanting to preserve a specific run's output
+   is expected to copy it elsewhere by hand. `results/` was already a
+   pre-existing, previously-unused `.gitignore` entry from an earlier
+   session — reused as-is; no `.gitignore` change was needed this
+   session.
+
+### 3.5 What this does and doesn't solve, precisely
+
+Confirmed working (`DATA_SCIENCE_ANALYSIS.md` §9.1–9.2): a single run's
+full proposal/evaluation/rejection trail is now inspectable after the
+fact, not just its final answer.
+
+**Not solved by this alone** (§9.3): the original motivating question —
+comparing *multiple* runs' logs against each other — since
+`results/smoke_test_log.json` is overwritten each run by design, there
+is currently no mechanism to retain more than one run's log at a time.
+Closing that gap needs a real, currently-undecided design (persisted,
+comparable output across many runs — format not yet chosen: JSON Lines,
+a growing array, or something else). Tracked as future work, not
+implemented this session — see `context_ml-agent_2026-07-19.md`.
+
+**Explicitly out of scope, per direct instruction, not merely
+deferred:** a Gemini-generated self-analysis abstract per run. Raised as
+a "just thinking" question this session, not adopted as a project goal —
+flagged in the context file as a genuine future soft-spot risk (an
+LLM's own narration of its reasoning quality isn't automatically
+trustworthy) if it's ever revisited, rather than a default to build
+toward.

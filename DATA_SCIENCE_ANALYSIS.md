@@ -8,8 +8,9 @@ n=5 and n=2 are not large enough to support strong statistical claims; this
 is an observational analysis of real agent behavior, not a controlled
 experiment._
 
-_Updated 2026-07-17 — see §8 for new findings from the first 3 live runs
-made possible by that session's orchestration-loop wiring._
+_Updated 2026-07-17 — see §8 for new findings from the first 3 live runs made possible by that session's orchestration-loop wiring_
+
+_Updated 2026-07-19 — see §9: per-iteration logging — first look inside a run's actual search path_
 
 ---
 
@@ -239,6 +240,104 @@ defect in any project code. Noted for completeness, not actionable.
 | Can today's data explain the iteration-count/warning variation between runs? | No — this requires per-iteration logging, not yet built. Flagged as planned future work. |
 
 ---
+
+<!--
+DATA_SCIENCE_ANALYSIS.md update — 2026-07-19 session
+-->
+
+## 9. Update, 2026-07-19: per-iteration logging — first look inside a run's actual search path
+
+§8.4 flagged an unanswered question: run 3 (of the 3-run set in §8)
+converged in 8 iterations with no `ConvergenceWarning`, versus 10
+iterations with the warning present in runs 1 and 2 — but the final
+printed result alone couldn't say why, since `run_agent_loop` returned
+only the final decision. This session built optional per-iteration
+logging (`log_iterations=True`; implementation in
+`TECHNICAL_NOTES.md` Part 3) to close that gap. This section reports
+what a first real logged run actually shows.
+
+### 9.1 One new logged run, Climate Crashes, `optimization_target="recall"`
+
+| Run | Model chosen | Recall | Precision | Iterations | `max_iterations` | `ConvergenceWarning`? |
+|---|---|---|---|---|---|---|
+| 8 | SVM, `kernel="rbf"`, `C=1`, `class_weight="balanced"` | 1.0 | 0.18 | 12 | 15 | Yes (during Logistic Regression's `train_model` call) |
+
+n=1 for this specific logged run — this section is about what the *log
+itself* reveals, not a new statistical claim; it should be read as a
+qualitative complement to §8's n=3 findings, not an addition to that
+sample.
+
+### 9.2 Finding: the log confirms the model-search pattern implied, but not directly observed, in §8
+
+With full visibility into the run for the first time, the actual
+sequence was:
+
+1. `list_available_models` (iteration 0)
+2. **Logistic Regression**, `class_weight="balanced"` proposed and
+   evaluated: recall 0.78, precision 0.25 — reasoned as "a strong
+   baseline," but flagged by the agent's own convergence reasoning as
+   having "significant room for improvement, especially in precision"
+   (iterations 1–4)
+3. **Random Forest**, `n_estimators=200`, `max_depth=10`,
+   `class_weight="balanced"` proposed next: recall *dropped* to 0.22,
+   precision rose to 0.4 — explicitly reasoned by the agent as "dropped
+   in recall significantly, making it unsuitable for the stated
+   optimization target" (iterations 5–8)
+4. **SVM**, `kernel="rbf"`, `C=1`, `class_weight="balanced"` proposed
+   third: recall 1.0, precision 0.18 — accepted, converged (iterations
+   9–12)
+
+This is the first time this project has had direct evidence of an
+agent *rejecting* an intermediate model specifically because it
+regressed on the stated optimization target (step 3), rather than
+inferring that kind of behavior indirectly from a final chosen model's
+metrics, as §8's pre-logging runs required. It's a small but concrete
+piece of evidence that the fix from §8 doesn't just produce a
+recall-maximizing final answer — the agent's *intermediate* reasoning,
+not only its final one, is legibly tracking the stated target
+throughout the search, not just at the end.
+
+### 9.3 The original §8.4 question: still not answered, and here's precisely why
+
+This one logged run does not, by itself, explain why run 3 (§8)
+converged faster with no warning than runs 1–2. That comparison needs
+multiple runs' *logs* set side by side — this session built the
+capability to produce a log per run, but not yet a way to persist and
+compare several runs' logs against each other (§8.4's original ask was
+specifically about *cross*-run comparison, not single-run visibility).
+The `ConvergenceWarning` was pinpointed for *this* run, though, as a
+useful side effect: it's now confirmed to fire specifically during
+Logistic Regression's `train_model` call (iteration 2 in this run's
+log), consistent with §6's earlier finding that the warning is tied to
+`LogisticRegression`'s own default `max_iter=100`, not to any
+particular dataset.
+
+**Status: cross-run comparison remains open, flagged as future work**
+(persisted, comparable log output across multiple runs — format not yet
+decided) — see `TECHNICAL_NOTES.md` Part 3 and
+`context_ml-agent_2026-07-19.md`.
+
+### 9.4 Reconfirming §8.3's precision caveat
+
+This run's precision (0.18) is consistent with §8's pattern — recall
+optimization, unqualified by any stated precision floor or cost ratio,
+continues to produce models that catch every real case at a real cost
+in false alarms. §8.3's proposed follow-up (a richer target expressing
+a precision floor or an explicit false-negative/false-positive cost
+ratio, rather than a bare metric name) remains unbuilt and, based on
+this additional data point, still seems like the right next refinement
+if this behavior needs adjusting.
+
+### 9.5 Updated summary table
+
+| Question | Answer, with appropriate caveats |
+|---|---|
+| Does the logged model-search trail confirm §8's optimization-target finding? | Yes — this run shows the agent explicitly rejecting an intermediate model (Random Forest) for regressing on the stated target, not just accepting a final model consistent with it. n=1 for this specific observation. |
+| Does this resolve §8.4's cross-run question? | No — that needs multiple runs' logs compared, which the logging feature enables but does not yet automate; still open. |
+| Does the precision caveat from §8.3 still hold? | Yes, reconfirmed on this additional run (precision 0.18). |
+
+---
+
 
 This analysis is intentionally kept separate from `README.md` (which
 carries only a compact summary, linking back here for full detail) and
