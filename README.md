@@ -1,6 +1,6 @@
 # ml-agent
 
-_Last updated: 2026-07-17_
+_Last updated: 2026-07-19_
 
 Agentic ML experimentation assistant — an LLM (Gemini) orchestrates dataset inspection, model proposal, training, and evaluation over scikit-learn via native function-calling, iterating toward a target metric in a supervised loop.
 
@@ -9,11 +9,11 @@ Agentic ML experimentation assistant — an LLM (Gemini) orchestrates dataset in
 - `dataset.py` — ✅ done and tested.
 - `tools.py` — ✅ done (5 tool schemas + inclusive-bounds convention documented; `TOOL_FUNCTIONS` name→callable mapping added 2026-07-15, now actively reused by `agent.py`'s dispatch-table wiring — see "Project structure" below).
 - `trainer.py` — ✅ done. Real sklearn fit/predict logic implemented: `train_model` fits the correct estimator per `model_type` via a registry lookup against `tools.py`'s schema; `evaluate_model` computes accuracy, precision, recall, f1, and a correctly-oriented confusion matrix using `pos_label`.
-- `agent.py` — ✅ **orchestration loop wired end-to-end (2026-07-17), verified via 3 real live runs.** `build_dispatch_table` now returns a `DispatchResult` (dispatch table + the run's `X`/`y`), and a new `run_session(dataset_name, optimization_target)` function connects it, `inspect_dataset`, and `gemini_client.run_agent_loop` into one real, callable entry point — see "`agent.py` — wiring the dispatch table" below.
-- `gemini_client.py` — ✅ **done and verified.** Implements the full agent loop: sends dataset context + tool schemas to Gemini, dispatches whichever tool call comes back, feeds results back, repeats until convergence or a max-iterations guard. Verified via multiple real end-to-end runs across both datasets (see "Data Science Notes" below).
-- `test_tools.py` — ✅ **done, 11 tests passing (2026-07-15).** The `TOOL_SCHEMAS` ↔ real-function signature drift check, using `inspect.signature()`. See "`test_tools.py` — the schema/function drift check" below.
+- `agent.py` — ✅ **orchestration loop wired end-to-end (2026-07-17), verified via 3 real live runs.** `build_dispatch_table` now returns a `DispatchResult` (dispatch table + the run's `X`/`y`), and `run_session(dataset_name, optimization_target)` connects it, `inspect_dataset`, and `gemini_client.run_agent_loop` into one real, callable entry point — see "`agent.py` — wiring the dispatch table" below. `run_session` also now forwards an optional `log_iterations` flag (2026-07-19) straight through to `run_agent_loop` — see "Per-iteration logging" below.
+- `gemini_client.py` — ✅ **done and verified.** Implements the full agent loop: sends dataset context + tool schemas to Gemini, dispatches whichever tool call comes back, feeds results back, repeats until convergence or a max-iterations guard. Verified via multiple real end-to-end runs across both datasets (see "Data Science Notes" below). **Now also supports optional per-iteration logging (2026-07-19)** — see "Per-iteration logging" below.
+- `test_tools.py` — ✅ **done, 12 tests passing (2026-07-15, extended 2026-07-19).** The `TOOL_SCHEMAS` ↔ real-function signature drift check, using `inspect.signature()`, plus a guard on the two dispatch-table override keys. See "`test_tools.py` — the schema/function drift check" below.
+- **Human-in-the-loop hook (2026-07-19): scope agreed, implementation still deferred.** The confirmation step described below (Category B → Category A handoff) will combine hyperparameter edge-case flagging, reasoning/action contradiction detection, and stalled/repeated-proposal detection — deliberately not a per-proposal approval gate, and deliberately not limited to reviewing only the final result. Build is intentionally deferred until the project is close to a finished, working state, not before — see "Roadmap context" below.
 - Also not yet started: `test_trainer.py`, `AGENTS.md`, `main.py`'s real CLI loop.
-- **Planned, not yet built:** optional per-iteration logging inside `run_agent_loop`, so a run's full sequence of tool calls (not just the final decision) can be inspected after the fact — see "Data Science Notes" below for the finding that motivated this.
 
 ---
 
@@ -47,7 +47,8 @@ This same principle extends deeper into the codebase over time:
 - Into `tools.py`: **which class counts as "positive"** for a given dataset is also a fact, not a judgment call, and is never something Gemini supplies or guesses (see "Datasets" → "What `pos_label` actually is" below).
 - Into `trainer.py`: **whether a proposed model/hyperparameter combination is even valid** is likewise a fact checked deterministically — against `list_available_models()`'s own schema — before any training happens, rather than left for Gemini's arguments to be trusted blindly (see "Validating Gemini's arguments before training" below).
 - Into `tools.py`'s parameter-visibility convention (confirmed 2026-07-15, project-wide, not a one-off): **keyword-only parameters are always internally injected, never something Gemini supplies or sees.** `evaluate_model`'s `pos_label` is the canonical example — it sits after `*` in the signature and is deliberately absent from its `TOOL_SCHEMAS` entry, because which class is "positive" is a documented dataset fact, not something Gemini should ever be asked to guess.
-- Into `agent.py`'s `run_session` (new, 2026-07-17): **which class is "positive" is a fact, resolved once per dataset — but what metric to optimize for (recall, precision, accuracy) is a judgment call**, made once per *run*, not baked into the dataset registry alongside `pos_label`. This is why `optimization_target` is a plain parameter on `run_session`, not a dataset fact — see "`agent.py` — wiring the dispatch table" below for the full reasoning, and for what "optimizing for recall" concretely means on this project's primary dataset.
+- Into `agent.py`'s `run_session` (2026-07-17): **which class is "positive" is a fact, resolved once per dataset — but what metric to optimize for (recall, precision, accuracy) is a judgment call**, made once per *run*, not baked into the dataset registry alongside `pos_label`. This is why `optimization_target` is a plain parameter on `run_session`, not a dataset fact — see "`agent.py` — wiring the dispatch table" below for the full reasoning, and for what "optimizing for recall" concretely means on this project's primary dataset.
+- Into `run_agent_loop`'s new `log_iterations` flag (2026-07-19): **whether to log is a caller's choice, not something the loop decides for itself.** `run_session` makes no logging decisions of its own — it just forwards whatever the caller asked for, keeping the same separation of concerns as everywhere else in this list.
 
 ---
 
@@ -100,9 +101,9 @@ A key design decision, made explicit early rather than left implicit in code: na
      ┌─────────────────────────┐                               │    extension point:
      │ train_model              │◄─────────────────────────────┘    could slot in
      │ (model_type, hparams)    │   agent.py copies proposal        exactly here
-     │ → model reference/id     │   fields verbatim into            (deferred — see
-     └────────────┬────────────┘   train_model's arguments           Development Notes)
-                  ▼
+     │ → model reference/id     │   fields verbatim into            (scope agreed
+     └────────────┬────────────┘   train_model's arguments           2026-07-19, build
+                  ▼                                                  still deferred)
      ┌─────────────────────────┐
      │ evaluate_model            │
      │ (model_ref, *, pos_label)  │  ← pos_label supplied internally
@@ -133,7 +134,7 @@ A key design decision, made explicit early rather than left implicit in code: na
               (max-iterations guard checked each pass)
 ```
 
-**Designed extension point:** a human-in-the-loop confirmation step (e.g. "approve this proposal before training?") slots in cleanly at the Category B → Category A handoff — between `record_model_proposal`'s return and `train_model`'s call — without requiring changes to either category's internals. **Not yet implemented; a `# TODO` marker sits at this exact point in `gemini_client.py`, deliberately deferred rather than built prematurely.** (Still open as of 2026-07-17 — this session wired the orchestration loop around this point without resolving the timing question itself.)
+**Designed extension point:** a human-in-the-loop confirmation step (e.g. "approve this proposal before training?") slots in cleanly at the Category B → Category A handoff — between `record_model_proposal`'s return and `train_model`'s call — without requiring changes to either category's internals. **Not yet implemented; a `# TODO` marker sits at this exact point in `gemini_client.py`.** As of 2026-07-19, the intended *scope* of this hook is now decided (see the status block at the top of this README and "Roadmap context" below) — but the build itself remains deliberately deferred until the project is closer to a finished, working state, so its design can draw on real agent behavior across many runs rather than being built off a single early example.
 
 The two Category B tools are worth a brief word each, since their names alone don't say much. `record_model_proposal` is how Gemini puts a candidate on the table — a model type, its hyperparameters, and the reasoning behind choosing them — without anything being trained yet. `record_convergence_decision` is the checkpoint after a model has actually been evaluated: Gemini looks at the metrics it just got back and states, explicitly, whether to stop here or try again, along with why.
 
@@ -143,7 +144,7 @@ All five tools above exist as ordinary Python functions in `tools.py`, but Gemin
 
 ## `test_tools.py` — the schema/function drift check
 
-_Added 2026-07-15._
+_Added 2026-07-15; extended 2026-07-19._
 
 ### Why this exists
 
@@ -168,34 +169,21 @@ _Added 2026-07-15._
                               set comparison: do these
                               two parameter-name sets
                               match exactly?
-                                           │
-                              ┌────────────┴────────────┐
-                              ▼                          ▼
-                         MATCH → pass             MISMATCH → fail loudly,
-                                                   naming exactly which
-                                                   param is missing/extra
 ```
 
-**In plain language:** this test exists so that if `tools.py` and `TOOL_SCHEMAS` ever disagree about what a tool's arguments look like, `pytest` fails immediately with a specific, named reason — instead of that disagreement surfacing as a confusing runtime error deep inside a live Gemini conversation.
+Keyword-only parameters (the internally-injected ones, e.g. `evaluate_model`'s `pos_label`) are deliberately excluded from this comparison — they're never part of what Gemini is meant to see or supply, so comparing them against the schema would be comparing the wrong thing entirely. Three checks run per tool: parameter names match in both directions, `required` in the schema matches which parameters actually lack a default, and every schema entry has a real registered function (and vice versa).
 
-Three checks, specifically:
-1. **Name-match** — every parameter name in the function must appear in the schema, and vice versa (catches renamed/added/removed arguments).
-2. **Required-match** — every schema `required` entry must correspond to a real parameter with no default, and vice versa (catches a newly-optional argument whose schema entry was never updated).
-3. **Registration-match** — every `TOOL_SCHEMAS` name must map to a real, registered function, and vice versa (catches a tool Gemini could never actually reach, or a schema entry with nothing behind it).
+**Result:** 12/12 passing, alongside the existing 9 in `test_dataset.py` (21/21 total).
 
-Keyword-only parameters (see the convention under "Core architectural principle" above) are excluded from all three checks, since they're never Gemini-visible in the first place.
+### Extension (2026-07-19): guarding the dispatch-table override keys
 
-`TOOL_FUNCTIONS` — the name→callable mapping used by these checks — lives in `tools.py` itself, next to `TOOL_SCHEMAS` (not duplicated in the test file), so any future dispatch-table wiring in `agent.py` can reuse the same mapping rather than maintaining an equivalent one separately. **As of 2026-07-17, this is no longer just a stated intention — `build_dispatch_table` genuinely reuses it, for the 3 of 5 tools that need no per-run binding; see "`agent.py` — wiring the dispatch table" below.**
-
-**Known follow-up, not yet built:** since `build_dispatch_table` now overrides 2 of `TOOL_FUNCTIONS`'s 5 entries by name (`train_model`, `evaluate_model`), a future rename of either function in `tools.py` would silently stop that override from working, with no error until a real run hit it. Extending this file's drift-check philosophy with an assertion that those two override keys still exist in `TOOL_FUNCTIONS` is planned but not implemented.
-
-**Result:** 11/11 passing, alongside the existing 9 in `test_dataset.py` (20/20 total).
+A fourth test, `test_dispatch_table_override_keys_exist()`, asserts that `"train_model"` and `"evaluate_model"` still exist as keys in `TOOL_FUNCTIONS` — added as explicit, by-name documentation of a concern originally raised during the 2026-07-17 orchestration wiring. Worth being precise about what this test actually guards, since the original stated rationale for it turned out to be inaccurate on closer inspection: `agent.py`'s dispatch-table override uses **literal string keys**, not a lookup into `TOOL_FUNCTIONS`, so a rename inside `TOOL_FUNCTIONS` cannot silently break that override the way it was originally described as doing. The real failure mode a rename *can* cause — `TOOL_SCHEMAS` declaring a tool name no longer present in `TOOL_FUNCTIONS` — was already caught by the pre-existing "every schema has a registered function" check above. This new test is retained as cheap, explicit documentation of the concern, not because it closes a gap that genuinely existed. Full detail in `TECHNICAL_NOTES.md` §2.2's correction note and Part 3, §3.1.
 
 ---
 
 ## `gemini_client.py` — the agent loop
 
-`run_agent_loop(dispatch_table, initial_context, *, model=DEFAULT_MODEL, max_iterations=MAX_ITERATIONS)` is the thin, deliberately "dumb" messenger between Gemini and the real scikit-learn machinery. It never trains a model or judges a metric itself — it relays Gemini's decisions to `dispatch_table`, and relays the real results back to Gemini, until Gemini calls `record_convergence_decision` with `continue_iterating=False`, or `max_iterations` is reached.
+`run_agent_loop(dispatch_table, initial_context, *, model=DEFAULT_MODEL, max_iterations=MAX_ITERATIONS, log_iterations=False)` is the thin, deliberately "dumb" messenger between Gemini and the real scikit-learn machinery. It never trains a model or judges a metric itself — it relays Gemini's decisions to `dispatch_table`, and relays the real results back to Gemini, until Gemini calls `record_convergence_decision` with `continue_iterating=False`, or `max_iterations` is reached.
 
 ```
                     ┌─────────────────────────────────────┐
@@ -224,8 +212,9 @@ Keyword-only parameters (see the convention under "Core architectural principle"
                      │    │ [HUMAN-IN-THE-LOOP HOOK —    │
                      │    │  only between record_model_  │
                      │    │  proposal's return and       │
-                     │    │  train_model's call — not    │
-                     │    │  implemented yet, deferred]  │
+                     │    │  train_model's call — scope  │
+                     │    │  agreed 2026-07-19, build     │
+                     │    │  still deferred]              │
                      │    └──────────┬────────────────────┘
                      │               ▼
                      │    ┌─────────────────────────────┐
@@ -243,9 +232,9 @@ Keyword-only parameters (see the convention under "Core architectural principle"
 - **`automatic_function_calling` is disabled.** If Gemini's own SDK executed functions directly, it would bypass `dispatch_table` entirely — meaning it would miss the real, per-run partial-bound `Trainer`/`X_train`/`y_train`/`pos_label` that `build_dispatch_table` sets up. Every tool call must go through `dispatch_table`, no exceptions.
 - **`TOOL_SCHEMAS` entries are wrapped explicitly into `FunctionDeclaration` objects** rather than passed as raw dicts, even though the SDK's Pydantic-based constructor accepts raw dicts fine at runtime via internal coercion — the explicit wrap avoids relying on undocumented behavior the SDK's own type stubs don't advertise.
 - **Conversation history uses `client.chats.create()`** (the SDK's own automatic history tracking) rather than manually assembled `types.Content` lists. Simplest available option; the trade-off (no manual control over pruning) is discussed in `TECHNICAL_NOTES.md`.
-- **Known limitation, not yet handled:** the loop assumes exactly one function call per Gemini turn. Gemini's function-calling mode can in principle return several parallel calls in a single response; this case isn't currently handled. **Still open as of 2026-07-17** — explicitly confirmed out of scope for that session's orchestration wiring, not silently dropped.
-- **Known limitation, not yet handled:** `record_convergence_decision`'s result is not echoed back to Gemini when the loop stops (`continue_iterating=False`) — the loop just returns. **Also still open as of 2026-07-17**, same status as above.
-- **Planned, not yet built (requested 2026-07-17):** optional per-iteration logging of each tool call (name, arguments, result), motivated by a real analysis gap — see "Data Science Notes" below.
+- **Known limitation, not yet handled:** the loop assumes exactly one function call per Gemini turn. Gemini's function-calling mode can in principle return several parallel calls in a single response; this case isn't currently handled. **Still open as of 2026-07-19** — untouched again this session, deliberately, consistent with the standing 2026-07-17 agreement to leave it deferred.
+- **Known limitation, not yet handled:** `record_convergence_decision`'s result is not echoed back to Gemini when the loop stops (`continue_iterating=False`) — the loop just returns. **Also still open as of 2026-07-19**, same status as above.
+- **Implemented (2026-07-19): optional per-iteration logging.** See "Per-iteration logging" below.
 
 ### `client.chats.create()` — internal dynamics
 
@@ -277,6 +266,108 @@ Keyword-only parameters (see the convention under "Core architectural principle"
 ```
 
 Every `chat.send_message()` call — the first `initial_context` or the tenth `function_response` — replays the *entire* accumulated history to `generate_content` each time. This is why `gemini_client.py` never has to manually remember prior iterations, but it's also why request size grows with iteration count. See `TECHNICAL_NOTES.md` for the full cost-scaling discussion — not an issue at the current `MAX_ITERATIONS = 10`, but worth understanding before that ceiling is ever raised significantly.
+
+---
+
+## Per-iteration logging (2026-07-19)
+
+### Why this exists
+
+Comparing multiple live runs against each other (see "Data Science Notes" below) surfaced a real limitation: `run_agent_loop` returned only the final decision — no record of which models were proposed, evaluated, or rejected along the way, and no way to answer questions like "why did this run converge faster than that one." `log_iterations` closes that gap for a single run.
+
+### How it works
+
+`log_iterations: bool = False` — opt-in, matching this project's existing default-off convention elsewhere (`class_weight=None`, `next_step_hint=""`). When enabled, every iteration of the loop appends one entry to a list, with a consistent key set regardless of what happened that iteration:
+
+```python
+{
+    "iteration": int,
+    "tool_name": str | None,       # None only when Gemini replied with plain text, no tool call
+    "tool_args": dict | None,      # same
+    "result": Any | None,          # same
+    "response_text": str | None,   # populated only on that same no-tool-call branch
+    "timestamp": str,              # UTC, ISO 8601
+}
+```
+
+The full log is returned under `result["log"]` — but only when `log_iterations=True`; callers that don't ask for it see no change at all in the function's return shape. `run_session` forwards this flag unchanged, making no logging decisions of its own.
+
+```
+                    ┌────────────────────────────────────────┐
+                    │  run_agent_loop(dispatch_table,          │
+                    │    initial_context, *, model,            │
+                    │    max_iterations, log_iterations=False) │
+                    └──────────────────┬─────────────────────┘
+                                       │
+                          log: list = []   ◄── empty unless log_iterations=True;
+                                              caller sees no change if unused
+                                       │
+                    ┌──────────────────▼─────────────────────┐
+                    │  chat = client.chats.create(...)         │
+                    │  response = chat.send_message(           │
+                    │      initial_context)                    │
+                    └──────────────────┬─────────────────────┘
+                                       │
+                     ┌─────────────────▼──────────────────┐
+                ┌───▶│  for iteration in range(max_iters):  │
+                │    └─────────────────┬─────────────────────┘
+                │                      ▼
+                │        function_calls = response.function_calls
+                │                      │
+                │         ┌────────────┴─────────────┐
+                │         ▼ empty                     ▼ has call(s)
+                │  ┌──────────────────────┐  call = function_calls[0]
+                │  │ if log_iterations:      │  (only first call used —
+                │  │  log.append({           │   known limitation, unchanged)
+                │  │   iteration,            │           │
+                │  │   tool_name: None,      │           ▼
+                │  │   tool_args: None,      │  tool_name, tool_args = ...
+                │  │   result: None,         │           │
+                │  │   response_text,        │           ▼
+                │  │   timestamp })          │  result = dispatch_table[tool_name](**tool_args)
+                │  └──────────┬──────────────┘           │
+                │             ▼                ┌─────────▼──────────────┐
+                │   return {status:             │ if log_iterations:      │
+                │    "stopped_without_          │  log.append({            │
+                │    convergence_call", ...     │   iteration, tool_name,  │
+                │    (+ "log": log if           │   tool_args, result,     │
+                │     log_iterations)}          │   response_text: None,   │
+                │                               │   timestamp })           │
+                │                               └─────────┬──────────────┘
+                │                                          ▼
+                │                     record_convergence_decision AND
+                │                     continue_iterating == False ?
+                │                              │              │
+                │                          yes │              │ no
+                │                              ▼              ▼
+                │              return {status: "converged",   record_model_proposal?
+                │               decision: result, ...          → human-in-the-loop TODO
+                │               (+ "log": log if                 (see above)
+                │                log_iterations)}                    │
+                │                                                     ▼
+                │                              response = chat.send_message(
+                │                                  function_response_part)
+                └───────────────────────────────────────────────────┘
+                          (loop back — next iteration)
+
+                    ── loop exhausts max_iterations without stopping ──
+                                       │
+                                       ▼
+                    return {status: "max_iterations_reached", ...
+                     (+ "log": log if log_iterations)}
+```
+
+**Why a consistent key set on every entry, rather than only including the applicable fields:** so `pd.DataFrame(result["log"])` produces a fully rectangular table immediately, and hand-written iteration (`entry["tool_name"]`) never hits a missing-key error. The trade-off is a few `None` values sitting in fields that don't apply to a given entry — judged a reasonable cost for that convenience.
+
+### Reading a log
+
+`format_log(log)`, also in `gemini_client.py`, renders a log list as a series of `=== Iteration N (timestamp) ===` blocks for terminal/human reading — kept as a shared, standalone utility (not private to any one caller), since anything else that ends up with a log list in hand later can reuse it.
+
+### Persistence (smoke-test usage only, not committed package behavior)
+
+`run_smoke_test.py` (gitignored) writes the full `result` dict as raw JSON to `results/smoke_test_log.json` on every run with `log_iterations=True`, **overwriting** the file each time — a deliberate choice, since individual agent runs aren't reproducible, so there's no meaningful continuous history to preserve in this particular file. Anyone wanting to keep a specific run's output is expected to copy it out by hand. `results/` was already a pre-existing, previously-unused `.gitignore` entry from an earlier session; reused as-is.
+
+**What this does and doesn't solve:** a single run's full proposal/evaluation/rejection trail is now inspectable after the fact — see "Data Science Notes" below for a concrete example. What it does *not* yet solve: comparing *multiple* runs' logs against each other, since the JSON file above is overwritten, not accumulated. That needs a real, still-undecided design (persisted, comparable output across many runs) — tracked as open work, see "Roadmap context" below.
 
 ---
 
@@ -368,7 +459,7 @@ def build_dispatch_table(
     return DispatchResult(dispatch_table=dispatch_table, X=X, y=y)
 ```
 
-Note the asymmetry visible directly in the dict spread: 3 of 5 entries come straight from `TOOL_FUNCTIONS` (`tools.py`'s own name→callable mapping) unchanged; 2 are overridden with `functools.partial`-bound versions built here, since only `build_dispatch_table` has the real per-run training data those two need. That asymmetry *is* the Category A/B split, made concrete in code rather than only described in prose.
+Note the asymmetry visible directly in the dict spread: 3 of 5 entries come straight from `TOOL_FUNCTIONS` (`tools.py`'s own name→callable mapping) unchanged; 2 are overridden with `functools.partial`-bound versions built here, since only `build_dispatch_table` has the real per-run training data those two need. That asymmetry *is* the Category A/B split, made concrete in code rather than only described in prose. (The override uses literal string keys, not a `TOOL_FUNCTIONS` lookup — see `test_tools.py`'s section above for why that matters for the drift-check test added 2026-07-19.)
 
 ### `DispatchResult`: why `build_dispatch_table`'s return type changed (2026-07-17)
 
@@ -384,9 +475,9 @@ class DispatchResult:
 
 Deliberately narrow — it carries `(X, y)` and the dispatch table only, **not** a formed prompt string. Prompt assembly stays outside this function (see `run_session` below), so `build_dispatch_table`'s own job stays exactly what its docstring already committed it to: resolving what's dataset- and run-specific, not writing prompts. Shaped as a frozen dataclass, matching this project's existing convention for named, self-documenting return values (`DatasetSpec` in `dataset.py` is the precedent).
 
-### `run_session`: the orchestration entry point (2026-07-17)
+### `run_session`: the orchestration entry point (2026-07-17; extended 2026-07-19)
 
-The piece that was missing until this session — everything it calls already existed and worked in isolation; nothing previously called them together with real, non-hand-built inputs in the committed codebase.
+The piece that was missing until the 2026-07-17 session — everything it calls already existed and worked in isolation; nothing previously called them together with real, non-hand-built inputs in the committed codebase.
 
 ```python
 def run_session(
@@ -396,6 +487,7 @@ def run_session(
     random_state: int = 42,
     model: str = DEFAULT_MODEL,
     max_iterations: int = MAX_ITERATIONS,
+    log_iterations: bool = False,
 ) -> dict[str, Any]:
     result = build_dispatch_table(dataset_name, random_state=random_state)
     facts = inspect_dataset(result.X, result.y)
@@ -403,6 +495,7 @@ def run_session(
     return run_agent_loop(
         result.dispatch_table, initial_context,
         model=model, max_iterations=max_iterations,
+        log_iterations=log_iterations,
     )
 ```
 
@@ -410,11 +503,13 @@ def run_session(
 
 **What "optimizing for recall" concretely means, on this project's primary dataset:** on Climate Crashes, `pos_label=1` marks a *simulation failure* — the rare (~8.5%), undesirable outcome. Optimizing for recall there means minimizing how many real crashes slip through undetected, even if that means more false alarms (flagging a run as risky when it would've been fine). The alternative, precision, asks the opposite question: of everything the model flagged as a crash, how many actually were one. Which one matters more is a judgment call that depends on which mistake is more costly in context — missing a real crash, vs. chasing a false alarm. This is exactly the judgment `optimization_target` exists to make explicit, rather than leaving it for Gemini to guess at (see "Data Science Notes" below for what happened when it wasn't stated).
 
+**`log_iterations` (2026-07-19)** is forwarded unchanged to `run_agent_loop` — `run_session` makes no logging decisions of its own; see "Per-iteration logging" above.
+
 `run_session` never calls `input()` — it stays directly callable with a hardcoded string, no interactive I/O to mock in a future test. Whichever CLI entry point is eventually built (`main.py`, not started) is responsible for actually asking the person what to optimize for.
 
 ### What's genuinely still missing
 
-The orchestration loop itself is now wired and verified (see "Data Science Notes" below for 3 live runs). What remains open: the human-in-the-loop hook (deferred, timing not decided this session either), the two `gemini_client.py` limitations noted above (single-call-per-turn, convergence result not echoed on stop), per-iteration logging (planned, not built), and `main.py`'s real interactive CLI loop.
+The orchestration loop itself is wired and verified (see "Data Science Notes" below for live runs). What remains open: the human-in-the-loop hook (scope agreed 2026-07-19, build still deferred), the two `gemini_client.py` limitations noted above (single-call-per-turn, convergence result not echoed on stop), a persisted format for comparing multiple logged runs against each other, and `main.py`'s real interactive CLI loop.
 
 ---
 
@@ -436,18 +531,19 @@ The orchestration loop itself is now wired and verified (see "Data Science Notes
 ├── main.py                 # CLI entry point / interactive loop — not yet written
 ├── ml_agent/
 │   ├── __init__.py
-│   ├── agent.py             # ✅ orchestration loop wired end-to-end (2026-07-17)
+│   ├── agent.py             # ✅ orchestration loop wired end-to-end (2026-07-17); log_iterations threaded through (2026-07-19)
 │   ├── dataset.py           # ✅ done — dataset-agnostic loading + inspection
-│   ├── gemini_client.py     # ✅ done — Gemini client + function-call dispatch loop, verified
+│   ├── gemini_client.py     # ✅ done — Gemini client + function-call dispatch loop, verified; per-iteration logging + format_log (2026-07-19)
 │   ├── tools.py              # ✅ done — Gemini function-calling tool schemas + TOOL_FUNCTIONS
 │   └── trainer.py            # ✅ done — storage, validation, and real sklearn fit/predict/evaluate
 ├── pyproject.toml
+├── results/                   # gitignored; run_smoke_test.py writes smoke_test_log.json here (overwritten per run)
 ├── run_smoke_test.py         # manual live-API smoke test of run_session(); gitignored
 ├── smoke_test.py              # isolated schema-construction check, no API key/network; gitignored
 ├── tests/
 │   ├── __init__.py
 │   ├── test_dataset.py       # ✅ done, 9 passing tests
-│   ├── test_tools.py         # ✅ done, 11 passing tests (2026-07-15)
+│   ├── test_tools.py         # ✅ done, 12 passing tests (2026-07-15; extended 2026-07-19)
 │   └── test_trainer.py       # not yet started
 └── uv.lock
 ```
@@ -517,7 +613,7 @@ uv run python run_smoke_test.py
 uv run pytest -v
 ```
 
-Network-dependent behavior (the Climate Crashes OpenML fetch) is not exercised directly in tests — it's mocked. Currently **20 tests passing**: 9 in `test_dataset.py`, 11 in `test_tools.py` (added 2026-07-15).
+Network-dependent behavior (the Climate Crashes OpenML fetch) is not exercised directly in tests — it's mocked. Currently **21 tests passing**: 9 in `test_dataset.py`, 12 in `test_tools.py` (added 2026-07-15, extended 2026-07-19).
 
 ---
 
@@ -555,7 +651,11 @@ Building `test_tools.py` surfaced one genuinely instructive Python-mechanics det
 
 Wiring `agent.py`'s real orchestration loop for the first time surfaced one design question worth documenting: `build_dispatch_table`'s return type needed to change (to also expose `(X, y)`, avoiding a second `load_dataset` call — see "`agent.py`" above), which raised the question of *where* the newly-required data should live. The choice made — a narrow `DispatchResult` carrying just `(X, y)` and the dispatch table, with prompt assembly kept as a separate caller-side step — was deliberately the smaller of two possible signature changes, favoring keeping `build_dispatch_table`'s job narrow over folding prompt construction into it as well.
 
-Reusing `tools.py`'s `TOOL_FUNCTIONS` mapping for 3 of the dispatch table's 5 entries (rather than hand-building all 5, as before) closes an explicitly-flagged open question from the 2026-07-15 session, but introduces a small, documented risk: if `train_model`/`evaluate_model` are ever renamed in `tools.py`, the 2 override entries would silently stop overriding, undetected until a real run hit it. A test extending `test_tools.py`'s drift-check philosophy to guard against this is planned, not yet built.
+Reusing `tools.py`'s `TOOL_FUNCTIONS` mapping for 3 of the dispatch table's 5 entries (rather than hand-building all 5, as before) closes an explicitly-flagged open question from the 2026-07-15 session. It was originally documented here as introducing a risk — that a rename of `train_model`/`evaluate_model` in `tools.py` would cause the 2 override entries to "silently stop overriding." **Correction (2026-07-19):** this turned out to be inaccurate. The override in `agent.py` uses literal string keys, not a `TOOL_FUNCTIONS` lookup, so it cannot fail this way — see `TECHNICAL_NOTES.md` §2.2's correction note for the full explanation, and Part 3 for the test that was built anyway (as documentation of the concern, not as a fix for a real gap).
+
+### Logging implementation notes (2026-07-19 session)
+
+Building `log_iterations` surfaced a small but real maintenance note, worth stating plainly for future editors: `run_agent_loop` has three separate `return` statements, and each independently needed its own `if log_iterations: outcome["log"] = log` line, since Python has no single "on any return" hook. Any future early-exit branch added to this function will need the same treatment explicitly — otherwise logging would silently stop being attached on just that one path, without raising any error, which is a more dangerous failure mode than a crash would be. Full implementation detail in `TECHNICAL_NOTES.md` Part 3.
 
 ### Data Science Notes — cross-dataset smoke test (2026-07-10)
 
@@ -579,7 +679,11 @@ A much more extensive live-agent version of this cross-dataset comparison — si
 
 With `run_session` wired end-to-end, the optimization-target finding above was acted on for the first time and tested against a live agent: 3 real runs, Climate Crashes, `optimization_target="recall"`. All 3 independently converged on an SVM (`class_weight="balanced"`) with recall = 1.0, each explicitly reasoning about the stated target — a direct, sharp contrast with the earlier finding that, without a stated target, the agent consistently traded recall away for a different metric. This is real, if preliminary (n=3, one dataset, one target), evidence the fix changes agent behavior in the intended direction.
 
-That said, recall = 1.0 came with low, largely unexamined precision in all three runs — worth a skeptical read, not treated as an unambiguous win: a model can reach perfect recall on a very small rare-class test set (9 examples) simply by predicting the positive class liberally. Whether "recall at any precision cost" is the right trade-off is a human judgment call the current single-metric target doesn't ask the agent to weigh. Full write-up, including the specific per-run numbers and an open question about run-to-run iteration-count variation that can't currently be answered without per-iteration logging, is in [`DATA_SCIENCE_ANALYSIS.md`](./DATA_SCIENCE_ANALYSIS.md) §8.
+That said, recall = 1.0 came with low, largely unexamined precision in all three runs — worth a skeptical read, not treated as an unambiguous win: a model can reach perfect recall on a very small rare-class test set (9 examples) simply by predicting the positive class liberally. Whether "recall at any precision cost" is the right trade-off is a human judgment call the current single-metric target doesn't ask the agent to weigh. Full write-up, including the specific per-run numbers and an open question about run-to-run iteration-count variation, is in [`DATA_SCIENCE_ANALYSIS.md`](./DATA_SCIENCE_ANALYSIS.md) §8.
+
+### Data Science Notes — per-iteration logging goes live (2026-07-19)
+
+With logging built, a run's actual model-search trail became inspectable for the first time, not just its final answer. One logged Climate Crashes run (`optimization_target="recall"`) shows the agent proposing Logistic Regression first (recall 0.78, precision 0.25), then explicitly *rejecting* a Random Forest proposal for regressing on the stated target (recall dropped to 0.22), before finally converging on an SVM (recall 1.0, precision 0.18) — the first direct evidence that the agent's intermediate reasoning, not just its final answer, stays legibly tied to the stated optimization target throughout a search. The original motivating question — why one run converges faster than another with no `ConvergenceWarning` — still isn't answered by a single run's log; it needs multiple runs' logs compared side by side, which is tracked as open work (see "Roadmap context" below). Full write-up in [`DATA_SCIENCE_ANALYSIS.md`](./DATA_SCIENCE_ANALYSIS.md) §9.
 
 ### Statistical rationale — `validate_split`'s threshold
 
@@ -600,4 +704,5 @@ Project 5 of a 10-step learning roadmap: Linux → Git → Professional Python �
 3. **As of 2026-07-10:** sklearn fit/evaluate logic and the `agent.py` train/test split + `validate_split` gate in place. `gemini_client.py` the explicit next milestone.
 4. **As of 2026-07-13:** `gemini_client.py` is complete and verified via multiple real end-to-end runs on both datasets. Remaining before the project's next phase: wire `agent.py`'s actual orchestration loop (currently only exercised via a hand-built standalone script, not real `agent.py` code), then `test_tools.py` (the `inspect.signature()` drift check), then `test_trainer.py`, then `AGENTS.md`.
 5. **As of 2026-07-15:** `test_tools.py` complete — 11/11 passing, 20/20 across the full suite. Next milestone: `agent.py`'s orchestration loop wiring — deciding how `build_dispatch_table` should expose `(X, y)`/`initial_context` to the real loop, injecting an explicit optimization target into `initial_context`, and deciding whether the human-in-the-loop hook gets built now or stays deferred. Recommended as its own dedicated session given its scope.
-6. **As of 2026-07-17 (current):** `agent.py`'s orchestration loop is wired end-to-end and verified via 3 live runs (`build_dispatch_table` → `DispatchResult` → `run_session` → `run_agent_loop`). The optimization-target injection is built and confirmed working against a live agent. **Not resolved this session:** the human-in-the-loop hook's timing (still deferred, undecided either way — not the same as "rejected"). **New, explicitly requested:** per-iteration logging inside `run_agent_loop`, to support deeper run-to-run analysis — planned for a future session. Next up: that logging feature, the `TOOL_FUNCTIONS`-rename test safeguard, then `test_trainer.py`, then `AGENTS.md`, then `main.py`'s real CLI loop.
+6. **As of 2026-07-17:** `agent.py`'s orchestration loop is wired end-to-end and verified via 3 live runs (`build_dispatch_table` → `DispatchResult` → `run_session` → `run_agent_loop`). The optimization-target injection is built and confirmed working against a live agent. **Not resolved this session:** the human-in-the-loop hook's timing (still deferred, undecided either way — not the same as "rejected"). **New, explicitly requested:** per-iteration logging inside `run_agent_loop`, to support deeper run-to-run analysis — planned for a future session.
+7. **As of 2026-07-19 (current):** per-iteration logging is built, verified via a live run, and made human-readable (`format_log`) and persistable (`results/smoke_test_log.json`, overwritten per run — see "Per-iteration logging" above). The `TOOL_FUNCTIONS`-rename test safeguard from item 6 is also built, though its original rationale was found to be inaccurate on closer inspection (see "Development Notes" above) — kept as documentation, not as a fix for a real gap. **The human-in-the-loop hook's scope is now decided** (hyperparameter edge-case flagging, reasoning/action contradiction detection, stalled/repeated-proposal detection — deliberately not per-proposal approval, deliberately not convergence-only review), but its **build remains deferred** until the project is close to a finished, working state. Next up, in rough order of readiness: a persisted, comparable log format across multiple runs (to finally answer the original run-to-run convergence-speed question); `main.py`'s real CLI loop; a short, human-friendly results summary distinct from the raw JSON log; then, once the project is closer to done, the human-in-the-loop hook itself. Either `main.py` or the cross-run comparison work is plausibly large enough to warrant its own dedicated session — flag this again once one of them is actually underway.
