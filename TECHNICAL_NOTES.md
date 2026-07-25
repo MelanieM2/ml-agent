@@ -465,6 +465,13 @@ committed package code beyond the `log_iterations=True` call itself:
    session — reused as-is; no `.gitignore` change was needed this
    session.
 
+**Superseded 2026-07-24 — see Part 4, §4.2.** The overwrite behavior
+described in point 2 above was replaced this session, once comparing
+multiple runs against each other became the actual goal. Left here
+unedited, as the accurate historical record of what was actually built
+and why on 2026-07-19, rather than silently rewritten to match the
+current behavior.
+
 ### 3.5 What this does and doesn't solve, precisely
 
 Confirmed working (`DATA_SCIENCE_ANALYSIS.md` §9.1–9.2): a single run's
@@ -480,6 +487,11 @@ comparable output across many runs — format not yet chosen: JSON Lines,
 a growing array, or something else). Tracked as future work, not
 implemented this session — see `context_ml-agent_2026-07-19.md`.
 
+**Resolved 2026-07-24 — see Part 4.** The cross-run comparison gap
+described in the paragraph above is now closed; `results/` files are no
+longer overwritten, and `ml_agent/compare_runs.py` builds the comparison
+this section anticipated needing.
+
 **Explicitly out of scope, per direct instruction, not merely
 deferred:** a Gemini-generated self-analysis abstract per run. Raised as
 a "just thinking" question this session, not adopted as a project goal —
@@ -487,3 +499,237 @@ flagged in the context file as a genuine future soft-spot risk (an
 LLM's own narration of its reasoning quality isn't automatically
 trustworthy) if it's ever revisited, rather than a default to build
 toward.
+
+
+<!--
+TECHNICAL_NOTES.md ADDITION — 2026-07-24 session
+-->
+
+---
+## Part 4: Fit-time warning capture, corrected run persistence, and cross-run comparison (2026-07-24)
+
+_Status: IMPLEMENTED and verified — warning capture and timing against 6
+live runs, `compare_runs.py` against those same 6 persisted files (see
+`DATA_SCIENCE_ANALYSIS.md` §10). Directly closes the cross-run comparison
+gap left open at the end of Part 3, §3.5._
+
+### 4.1 Fit-time warning capture in `trainer.py`
+
+**The problem.** `DATA_SCIENCE_ANALYSIS.md` §6 and §9.3 both relied on a
+`ConvergenceWarning` that was only ever observed by watching raw terminal
+output during a live run — nothing in `train_model`'s return value
+captured it, so it couldn't be persisted, compared across runs, or
+relied on for anything beyond that one manual observation.
+
+**The fix.** `Trainer.train_model` wraps only the `estimator.fit(...)`
+call — deliberately not the whole method — in `warnings.catch_warnings`:
+
+```python
+with warnings.catch_warnings(record=True) as caught:
+    warnings.simplefilter("always")
+    estimator.fit(X_train, y_train)
+
+fit_warnings = [
+    {"category": w.category.__name__, "message": str(w.message)}
+    for w in caught
+]
+```
+
+`train_model` now always returns a `"warnings"` key alongside
+`model_ref` — `[]` when nothing fired — matching the same
+"consistent-key-set-regardless-of-branch" convention already established
+for the per-iteration log in Part 3, §3.2.
+
+**Scoped to only the `fit()` call, not the whole method, on purpose.**
+Wrapping `train_model` in its entirety would risk misattributing a
+warning raised by, say, `validate_hyperparameters` or schema lookup — code
+that has nothing to do with the model actually fitting — to the fit
+itself. Narrowing the `with` block to the one line that can plausibly
+raise a training-related warning keeps `fit_warnings` an honest record of
+what happened during fitting, specifically.
+
+**Deliberately captures every warning category, not filtered to
+`ConvergenceWarning`.** A filter narrowed to today's one known warning
+type would hardcode the current observation and silently miss anything
+else scikit-learn might raise later (e.g. a `DataConversionWarning`) —
+judged, and confirmed with Melanie, as the wrong trade-off for a project
+whose whole point in this area is giving a future reader honest
+visibility into what actually happened during training.
+
+### 4.2 Correction: what `simplefilter("always")` actually protects against
+
+`warnings.simplefilter("always")`, set inside the `with` block, overrides
+Python's own default warning behavior — by default, an identical warning
+(same message, category, and source location) is shown only on its
+*first* occurrence per process; every later occurrence is silently
+suppressed unless the filter is changed.
+
+**An earlier, imprecise version of this explanation (given
+conversationally, before this write-up) described the risk as spanning
+separate invocations of `run_smoke_test.py` — e.g., framing it as "a
+second run" losing its warning.** That's corrected here, in full, rather
+than left standing:
+
+Each `uv run python run_smoke_test.py` invocation starts a fresh Python
+process. The warning-deduplication registry
+(`__warningregistry__`) lives in the memory of the *module* that issues
+the warning (an internal scikit-learn module, in this case), for the
+lifetime of that process. A fresh process means a fresh, empty registry
+— so separate terminal invocations, exactly like the six real runs
+behind `DATA_SCIENCE_ANALYSIS.md` §10, were never at risk of suppressing
+each other's warnings, with or without `"always"` set.
+
+**What `"always"` genuinely protects against** is narrower, and confined
+to a single process: any code path where the *same* warning could fire
+more than once *within one running process*. Concretely, this could
+matter for:
+- a future `main.py` that runs several agent sessions in one long-lived
+  process, without restarting between them;
+- a `pytest` run where more than one test exercises Logistic Regression
+  training in the same test-suite process;
+- a single agent run in which Gemini happens to propose and train
+  Logistic Regression more than once before converging (not observed in
+  any of tonight's six runs, but not ruled out by anything in the code).
+
+Without `"always"`, only the first such occurrence in a process would
+ever be recorded in `fit_warnings` — every subsequent one would vanish
+silently, with no exception, no missing key, nothing to signal that data
+had been dropped. The two-line cost of `simplefilter("always")` is
+retained as insurance against that specific, process-scoped failure
+mode — not because it was needed by anything observed this session.
+Full discussion and the corrected summary table are in
+`DATA_SCIENCE_ANALYSIS.md` §10.3/§10.6.
+
+### 4.3 `run_smoke_test.py`: persistence correction and timing (gitignored, not committed package code)
+
+**Persistence, corrected.** Part 3, §3.4 documented `results/
+smoke_test_log.json` as deliberately overwritten each run, reasoned at
+the time as "individual agent runs aren't reproducible, so there's no
+meaningful continuous history to preserve." That reasoning held only as
+long as no feature needed more than one run's data at once. Once
+cross-run comparison became the actual goal, an overwritten single file
+made that structurally impossible — not merely inconvenient — so this
+session replaced it: each run now writes its own timestamped file,
+`results/smoke_test_log_<YYYY_MM_DD_HHMMSS>.json`. `results/` remains the
+same pre-existing gitignored directory; no `.gitignore` change was
+needed for the new filename pattern.
+
+**Timing, added as a local script convenience, not a package API
+change.** `time.time()` wraps the `run_session(...)` call directly in
+`run_smoke_test.py`; the resulting `elapsed_seconds` is printed to the
+terminal and, in a second pass this same session, also persisted into
+the saved file — built as a new dict at write time
+(`{**result, "elapsed_seconds": elapsed_seconds}`), so the in-memory
+`result` used by the earlier print/`format_log` calls stays unmodified.
+This was a deliberate scope choice: an earlier option considered adding
+`elapsed_seconds` to `run_agent_loop`'s own returned outcome dict
+(timed from before the first API call), which would have made it
+available to every future caller automatically. Melanie chose the
+simpler, narrower option instead — this is manual-testing
+instrumentation, not part of `run_session`/`run_agent_loop`'s committed
+API surface. A consequence worth stating plainly: a future caller (e.g.
+`main.py`) that wants timing will need its own separate wrap; nothing
+upstream provides it automatically.
+
+### 4.4 `ml_agent/compare_runs.py`: design and implementation
+
+**The problem.** With runs now persisted individually (§4.3), the
+cross-run comparison gap flagged at the end of Part 3, §3.5, finally had
+real data to build against.
+
+**`summarize_run(run_data, source_file=None) -> dict`.** A pure function
+of its input dict — no file I/O, no live API call — matching the same
+"isolate the checkable part" instinct behind `validate_split`
+(`agent.py`) and `validate_hyperparameters` (`trainer.py`). Iterates a
+run's `log` list (when present — see the defensive-coding note below)
+and extracts:
+
+- `model_sequence` — every `train_model` call's `model_type`, in order
+- `final_model_type` / `final_metrics` — from the *last* `evaluate_model`
+  entry seen
+- `warnings_encountered` — flattened across every `train_model` call's
+  `result["warnings"]`, each tagged with its iteration and model type
+- `convergence_reasoning` — from the *last* `record_convergence_decision`
+  entry seen
+
+**Two judgment calls, flagged directly in the function's own docstring,
+true of every run observed so far but not independently verified as
+universal:**
+1. "Final model" is read as the *last* `evaluate_model` call in the log
+   — not cross-checked against the wording of the run's own convergence
+   decision. If a run ever evaluated a model, rejected it, then stopped
+   without evaluating anything further, this would misreport the
+   rejected model as final. Not observed in any real run to date.
+2. `convergence_reasoning` takes the *last*
+   `record_convergence_decision` entry seen, regardless of the run's
+   final `status` — deliberate, so a run that hit `max_iterations` while
+   still reasoning (`continue_iterating=True`) still surfaces its last
+   stated reasoning rather than `None`.
+
+**Defensive `.get(...)` access throughout, not direct key indexing —
+and why it's kept even though the original problem it solved was
+resolved a different way.** `summarize_run` was originally written this
+way to tolerate older, pre-warning-capture result files that Melanie had
+renamed into the current filename convention (files with no `warnings`
+key on any `train_model` result, and no top-level `elapsed_seconds` key
+at all). Melanie subsequently deleted those older files outright rather
+than carry the compatibility burden — removing the *immediate* need.
+The defensive coding was kept anyway, as low-cost insurance against a
+different, still-live case: any future caller of `run_session`/
+`run_agent_loop` that doesn't pass `log_iterations=True` — most
+plausibly `main.py`, not yet built, which has no current requirement to
+opt into logging.
+
+**`build_comparison(results_dir=Path("results")) -> list[dict]`.** Scans
+for every `smoke_test_log_*.json` file present and calls `summarize_run`
+on each — not capped at any particular count; confirmed to generalize to
+however many files exist, not just two (the explanatory diagram used
+during design showed two purely for legibility).
+
+**Output.** A `__main__` block writes the resulting list to
+`results/comparison_<timestamp>.json`, matching the existing per-run
+naming convention.
+
+**Verified against real data** — see `DATA_SCIENCE_ANALYSIS.md` §10 for
+the full findings from running this against six real live runs from a
+single evening.
+
+### 4.5 Known limitations, not fixed this session
+
+**Failed/interrupted runs are invisible to comparison, not just
+excluded from it.** One live run tonight hit the Gemini API's own
+free-tier rate limit (`429 RESOURCE_EXHAUSTED`, 15 requests/minute) and
+crashed with an unhandled exception before `run_smoke_test.py` ever
+reached its file-write step. No file, no trace, nothing for
+`compare_runs.py` to find — a crashed attempt and a nonexistent attempt
+are currently indistinguishable from this comparison's point of view.
+Accepted as a known limitation; mitigated in practice by spacing manual
+runs apart and treating only fully-written files as ground truth. Not a
+code fix planned as of this session.
+
+**Timestamp-format inconsistency between the two scripts, unresolved.**
+`run_smoke_test.py` names its output files using naive local time
+(`datetime.now()`); `compare_runs.py`'s own `__main__` block names its
+output using UTC (`datetime.now(timezone.utc)`). Both sort correctly in
+isolation — the zero-padded `YYYY_MM_DD_HHMMSS` format is lexicographically
+chronological either way — but the two scripts don't share one
+convention. Low priority; noted for a future consistency pass, not
+addressed this session.
+
+**The underlying `ConvergenceWarning` itself remains unaddressed.**
+§4.1 above captures and surfaces the warning; it does not change why it
+fires. `LogisticRegression`'s `lbfgs` solver still hits its default
+`max_iter=100` on every run that proposes it. Whether, and how, to
+actually address that (raise the default? leave it as informative signal
+for the agent's own reasoning about convergence, rather than something
+to silence? something else entirely?) is a genuinely open design
+question, not yet even narrowed to a shortlist — flagged here explicitly
+as unresolved, for a future session to pick up.
+
+**`test_tools.py` not yet reviewed against `train_model`'s new
+`"warnings"` return key.** §4.1's change alters `train_model`'s return
+shape. Whether this affects any existing assertion in `test_tools.py` —
+including the `inspect.signature()`-based drift check described in Part
+3, §3.1's precedent — has not been checked. Explicitly deferred to the
+next working session, at Melanie's direct request, rather than folded in
+here.

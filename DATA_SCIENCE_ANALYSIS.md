@@ -12,6 +12,8 @@ _Updated 2026-07-17 — see §8 for new findings from the first 3 live runs made
 
 _Updated 2026-07-19 — see §9: per-iteration logging — first look inside a run's actual search path_
 
+_Updated 2026-07-24 — see §10: cross-run comparison goes live — the §8.4/§9.3 question finally has real, comparable data behind it_
+
 ---
 
 ## 1. The dataset asymmetry this analysis depends on
@@ -338,6 +340,132 @@ if this behavior needs adjusting.
 
 ---
 
+<!--
+DATA_SCIENCE_ANALYSIS.md update — 2026-07-24 session
+-->
+
+## 10. Update, 2026-07-24: cross-run comparison goes live — the §8.4/§9.3 question finally has real data behind it
+
+§9.3 left the original §8.4 question explicitly open: run-to-run
+variation in iteration count and `ConvergenceWarning` presence needed
+*multiple* runs' logs compared side by side, which the logging feature
+enabled but didn't yet automate. This session built that missing piece
+(`ml_agent/compare_runs.py`; implementation in `TECHNICAL_NOTES.md`
+Part 4) and generated six fresh live runs to test it against. This
+section reports what comparing them actually shows — a real answer,
+though a more qualified one than "warning vs. no warning" alone.
+
+### 10.1 Six real runs, Climate Crashes, `optimization_target="recall"`
+
+| Run (local time) | Model sequence | Final recall / precision | Iterations | `ConvergenceWarning`? | `elapsed_seconds` |
+|---|---|---|---|---|---|
+| 23:00:36 | Random Forest → SVM (linear) | 0.778 / 0.25 | 8 | No | not yet captured (built later this session) |
+| 23:17:59 | LogReg → Random Forest → SVM (rbf) | 1.0 / 0.18 | 12 | Yes | not yet captured |
+| 23:36:53 | LogReg → Random Forest → SVM (rbf) | 1.0 / 0.18 | 10 | Yes | not yet captured |
+| 23:39:38 | LogReg → Random Forest → SVM (rbf) | 1.0 / 0.18 | 10 | Yes | not yet captured |
+| 23:56:33 | LogReg → Random Forest → SVM (rbf) | 1.0 / 0.18 | 10 | Yes | 8.4 |
+| 23:57:39 | LogReg → Random Forest → SVM (rbf) | 1.0 / 0.18 | 10 | Yes | 8.1 |
+| (failed) | — | — | — | 429 rate-limit; crashed before any file was written | — |
+
+n=6 completed runs, one incomplete attempt excluded (see §10.5). All six
+generated in a single evening, same dataset, same target, same code —
+this is closer to a controlled repeat than most of this document's
+earlier findings, but still not a designed experiment (no seed control
+over Gemini's own sampling).
+
+### 10.2 Finding: the warning/iteration-count variation is explained by *which models get proposed at all*, not by the warning alone
+
+Five of six runs proposed **Logistic Regression first**, hit the same
+`ConvergenceWarning`, then moved through Random Forest to a final SVM
+with `kernel="rbf"` and recall = 1.0. The sixth run never proposed
+Logistic Regression at all — it went straight to Random Forest, then an
+SVM with `kernel="linear"` — converged two iterations sooner, and landed
+on a *lower* final recall (0.778 vs. 1.0).
+
+This refines §6's finding rather than contradicting it: the warning is
+still tied to `LogisticRegression`'s own default `max_iter=100`,
+independent of dataset (§6 remains correct as far as it goes) — but
+*whether a given run encounters the warning at all* now looks like it
+depends on whether Gemini proposes Logistic Regression in the first
+place, which is itself the same kind of run-to-run non-determinism §5
+already flagged as open and unresolved. **This is a plausible inference
+from six data points, not a proven cause** — it would take a
+substantially larger sample, or some way of inspecting *why* Gemini
+chose its first proposal, to state this with real confidence.
+
+### 10.3 Correction: what `warnings.simplefilter("always")` actually protects against
+
+An earlier explanation this session (given conversationally, before this
+write-up) described the risk `simplefilter("always")` guards against as
+spanning *separate runs* of `run_smoke_test.py` — e.g., "a second run
+hitting the identical warning could go undetected." **That framing was
+imprecise, and is corrected here rather than left standing.**
+
+Each invocation of `uv run python run_smoke_test.py` starts a fresh
+Python process. Python's warning-deduplication registry
+(`__warningregistry__`) lives in the memory of the module that issues
+the warning, for the lifetime of that process — so it already resets
+naturally between separate terminal invocations, with or without
+`"always"`. None of tonight's six runs could have suppressed each
+other's warnings even under Python's default filter, since each was
+launched as its own process.
+
+**What `"always"` actually protects against is narrower, and still
+real:** any case where the *same warning could fire more than once
+within a single process* — for instance, a future `main.py` that runs
+several sessions in one long-lived process without restarting between
+them, a `pytest` run exercising Logistic Regression training in more
+than one test, or a single agent run where Gemini happens to propose
+Logistic Regression more than once before converging. Without
+`"always"`, only the *first* such occurrence in a process would ever be
+recorded — every later one would silently vanish from `train_model`'s
+returned `warnings` list, with no error, no missing key, nothing to
+indicate data had been dropped. For a project whose entire point in this
+area is building a reliable record of what actually happened during a
+run, a filter that could silently under-report is a correctness risk
+worth the two extra lines, even though it happened not to matter for any
+of tonight's six separately-invoked runs specifically.
+
+### 10.4 Reconfirming the precision caveat, again
+
+All five runs that reached recall = 1.0 did so with the same precision,
+0.18, and the same confusion matrix (`[[58, 41], [0, 9]]`) — identical
+down to the exact figures, not just similar. This is a striking degree
+of consistency for an LLM-orchestrated, non-deterministic search, and is
+worth flagging plainly: it suggests that once a run reaches "SVM,
+`kernel=rbf`, `class_weight=balanced`, `C=1`" on this exact dataset and
+split (`random_state=42` is the default, unchanged across all runs
+tonight), the *model's* behavior is fully deterministic even when the
+*path to reach it* wasn't. §8.3's caveat still stands unchanged: recall
+= 1.0 continues to come at a real, largely unexamined cost in false
+alarms, and the richer-target follow-up proposed there (a stated
+precision floor, or an explicit false-negative/false-positive cost
+ratio) remains unbuilt and still looks like the right next refinement.
+
+### 10.5 Known limitation: a failed run is invisible to this comparison, not just excluded from it
+
+One of tonight's seven attempts hit the Gemini API's own free-tier rate
+limit (`429 RESOURCE_EXHAUSTED`, 15 requests/minute) and crashed with an
+unhandled exception — before `run_smoke_test.py` ever reached its
+file-write step. No trace of that attempt exists in `results/`, and
+`compare_runs.py` has no way to know it happened at all; it can only
+ever summarize runs that completed and wrote a file. This is accepted as
+a known limitation for now (see `TECHNICAL_NOTES.md` Part 4), not a
+data-quality problem with the comparison above — but worth stating
+explicitly, since "6 of 7 attempts" and "6 of 6 known runs" are not the
+same claim, and only the second is what §10.1's table actually shows.
+
+### 10.6 Updated summary table
+
+| Question | Answer, with appropriate caveats |
+|---|---|
+| Does §10's data finally answer §8.4/§9.3's original cross-run question? | Partially. The warning/iteration-count variation tracks *which models get proposed at all*, specifically whether Logistic Regression is tried — not the warning occurring independently of model choice. Inference from n=6, not proven. |
+| Is the `ConvergenceWarning` still confirmed tied to `LogisticRegression`'s defaults, independent of dataset? | Yes, §6's original finding is unchanged and reconfirmed on 5 further runs. |
+| Was the earlier same-session claim about `simplefilter("always")` protecting *across* separate runs accurate? | No — corrected in §10.3. Each `run_smoke_test.py` invocation is its own process; the real protection is against repeated warnings *within* one process, not across separately-launched runs. |
+| Does the precision caveat from §8.3 still hold? | Yes — reconfirmed, with notably exact consistency (identical precision and confusion matrix) across all five recall=1.0 runs. |
+| Is every run attempted this evening reflected in this comparison? | No — one failed run (API rate limit) produced no file and is invisible to `compare_runs.py` by construction; flagged as a known, unfixed limitation. |
+
+---
 
 This analysis is intentionally kept separate from `README.md` (which
 carries only a compact summary, linking back here for full detail) and
