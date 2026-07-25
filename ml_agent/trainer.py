@@ -1,6 +1,7 @@
 # trainer.py — real sklearn fitting/evaluation logic
 
 import uuid
+import warnings
 from typing import Any
 
 import pandas as pd
@@ -55,8 +56,25 @@ class Trainer:
         in build_dispatch_table (agent.py) — Gemini only ever supplies
         model_type and hyperparameters.
 
-        Returns only {"model_ref": ...} — Gemini is never shown the fitted
-        object itself, only an id it can pass back into evaluate_model later.
+        Returns {"model_ref": ..., "warnings": [...]} — Gemini is never
+        shown the fitted object itself, only an id it can pass back into
+        evaluate_model later, plus a (possibly empty) list of any
+        warnings raised during fit.
+
+        NEW (this session): fit-time warning capture. `warnings` is
+        always present, even when empty — same "consistent key-set
+        regardless of branch" convention already used for the
+        per-iteration log in gemini_client.py. Captures ALL warning
+        categories raised during fit, not just 
+        ConvergenceWarning specifically — a deliberate, 
+        confirmed design choice (07-24) 
+        to keep this general-purpose rather than hardcoding 
+        today's (07-25) one known case. 
+        simplefilter("always") is required inside the
+        catch_warnings block so a warning that already fired once
+        earlier in the same process isn't silently deduplicated by
+        Python's default once-per-location behavior — without this, a
+        second run hitting the identical warning could go undetected.
         """
         schema = list_available_models()["models"]
         validate_hyperparameters(model_type, hyperparameters, schema)
@@ -73,7 +91,18 @@ class Trainer:
         # -- valid because validate_hyperparameters already confirmed every
         # key/value pair is legitimate for this model_type.
         estimator = estimator_class(**hyperparameters)
-        estimator.fit(X_train, y_train)
+
+        # Wrap ONLY the fit call — not the whole function — so warnings
+        # from schema validation or anything else above/below this block
+        # are never misattributed to the fit itself.
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            estimator.fit(X_train, y_train)
+
+        fit_warnings = [
+            {"category": w.category.__name__, "message": str(w.message)}
+            for w in caught
+        ]
 
         model_ref = uuid.uuid4().hex
         label = f"{model_type}_{model_ref[:6]}"
@@ -84,7 +113,7 @@ class Trainer:
             "hyperparameters": hyperparameters,
             "label": label,
         }
-        return {"model_ref": model_ref}
+        return {"model_ref": model_ref, "warnings": fit_warnings}
 
     def evaluate_model(
         self,
