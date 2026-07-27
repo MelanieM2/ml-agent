@@ -16,10 +16,17 @@ from google.genai import types
 
 from ml_agent.tools import TOOL_SCHEMAS
 
-# Open decision #2 (07-12 session): 10 chosen deliberately small for
-# early debugging — a broken convergence check surfaces fast and cheaply.
-# Raise this once the loop is trusted end-to-end.
-MAX_ITERATIONS = 10
+# Open decision #2 (07-12 session), RESOLVED 2026-07-27: 10 was chosen
+# deliberately small for early debugging, on the explicit condition that
+# it be raised "once the loop is trusted end-to-end" (see original
+# comment, preserved in git history). That condition is now met: 9 live
+# runs across two sessions (07-24's six-run comparison, plus 3 more this
+# session) have all shown coherent, sensible tool sequencing, and this
+# session's own main.py run hit the 10-iteration ceiling mid-proposal,
+# before a legitimate in-progress retry could even reach train_model --
+# clipping real work, not catching a bug. Raised to 15. See
+# TECHNICAL_NOTES.md Part 5, §5.9 for the full rationale.
+MAX_ITERATIONS = 15
 DEFAULT_MODEL = "gemini-3.1-flash-lite"
 
 
