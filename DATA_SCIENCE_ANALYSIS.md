@@ -14,6 +14,8 @@ _Updated 2026-07-19 — see §9: per-iteration logging — first look inside a r
 
 _Updated 2026-07-24 — see §10: cross-run comparison goes live — the §8.4/§9.3 question finally has real, comparable data behind it_
 
+_Updated 2026-07-27 — see §11: `max_iter` exposed as a tunable hyperparameter — the ConvergenceWarning shortlist decision, tested against 3 live runs_
+
 ---
 
 ## 1. The dataset asymmetry this analysis depends on
@@ -464,6 +466,146 @@ same claim, and only the second is what §10.1's table actually shows.
 | Was the earlier same-session claim about `simplefilter("always")` protecting *across* separate runs accurate? | No — corrected in §10.3. Each `run_smoke_test.py` invocation is its own process; the real protection is against repeated warnings *within* one process, not across separately-launched runs. |
 | Does the precision caveat from §8.3 still hold? | Yes — reconfirmed, with notably exact consistency (identical precision and confusion matrix) across all five recall=1.0 runs. |
 | Is every run attempted this evening reflected in this comparison? | No — one failed run (API rate limit) produced no file and is invisible to `compare_runs.py` by construction; flagged as a known, unfixed limitation. |
+
+---
+
+<!--
+DATA_SCIENCE_ANALYSIS.md update — 2026-07-27 session
+-->
+
+## 11. Update, 2026-07-27: `max_iter` exposed as a tunable hyperparameter — the ConvergenceWarning shortlist decision, tested against 3 live runs
+
+§10's own limitations list (§10.6 / `TECHNICAL_NOTES.md` §4.5) named the
+`ConvergenceWarning` itself as still unaddressed: captured and visible
+since 2026-07-24, but nothing about *why* it fired had changed, and no
+shortlist of options had even been drafted. This session did both —
+narrowed the shortlist to a decision, implemented it
+(`TECHNICAL_NOTES.md` Part 5 covers the schema/plumbing side), and
+generated 3 fresh live runs to see what the agent actually does with the
+new lever.
+
+### 11.1 The shortlist, and the decision made
+
+Three candidate approaches were discussed with Melanie:
+
+- **(A) Raise `max_iter`'s default** (e.g. to 500) so the warning stops
+  firing in most/all runs. Rejected: this would silently remove the
+  exact signal §10's six-run comparison depended on — the warning's
+  presence/absence is what let §10.2 distinguish "Logistic Regression
+  was tried and struggled" from "Logistic Regression was never tried at
+  all." Erasing the warning would have made that finding
+  unreproducible going forward.
+- **(B) Leave the default at 100; let the agent reason about the
+  warning itself** when it appears, using `train_model`'s already-
+  returned `warnings` list (§10's own capture feature) as input to its
+  own decision-making.
+- **(C) Expose `max_iter` as a hyperparameter the agent can choose**,
+  giving it a concrete lever to act on once it notices a warning.
+
+**Decision: B primary, with C as the concrete mechanism B needs to act
+on** — not A. This preserves the warning as a real, observable event
+(so §10's comparison methodology stays valid on future runs) while
+giving the agent an actual way to respond to it, rather than only ever
+observing it.
+
+### 11.2 A caveat stated before, not after, seeing results
+
+Before any run was made, it was flagged explicitly that "the data
+reaching Gemini" and "Gemini reasoning well about that data" are
+separate claims — a warning surfaced inside a JSON tool result is a
+plumbing success regardless of whether the model does anything sensible
+with it. This distinction matters for how §11.3's results below should
+be read: they demonstrate the *mechanism* works, not that it will
+reliably work this way on every future run.
+
+### 11.3 Three live runs, Climate Crashes, `optimization_target="recall"`, `max_iter` now exposed
+
+| Run | Model sequence (with `max_iter` retries shown) | Final recall / precision | Iterations | Notes |
+|---|---|---|---|---|
+| A | LogReg (`class_weight="balanced"`, warning fires) → LogReg retry (`max_iter=500`, same else, warning clears) → RF (`class_weight="balanced"`) → SVM (`kernel="rbf"`, `class_weight="balanced"`) | 1.0 / 0.18 | 14 | `max_iter`-only retry: metrics on the LogReg retry were **bit-identical** to the pre-retry LogReg attempt (0.787 acc / 0.25 prec / 0.778 recall, both times) — the warning cleared with zero change to predictions |
+| B | LogReg (`class_weight="balanced"`, warning fires) → RF (`n_estimators=200`, `max_depth=10`, `class_weight="balanced"`) → LogReg retry (`max_iter=500`, **`C=0.1`**, `class_weight="balanced"`) | 1.0 / 0.25 | 10 | retry changed `max_iter` and `C` together |
+| C | LogReg (`class_weight="balanced"`, `C=1`, warning fires) → RF (`n_estimators=200`, `class_weight="balanced"`) → LogReg retry (`max_iter=500`, **`C=0.1`**, `class_weight="balanced"`) | 1.0 / 0.25 | 10 | retry changed `max_iter` and `C` together; final metrics **bit-identical** to Run B, including the confusion matrix |
+
+n=3, all Climate Crashes, all same `optimization_target`, generated in a
+single session immediately after the schema change — a first look, not
+a large sample. As with §10's six-run table, read these as observed
+behavior, not a designed, controlled experiment.
+
+### 11.4 Finding: the mechanism works, exactly as designed — documented fact, not inference
+
+All three runs independently demonstrate the same causal chain: `train_model`
+returns a `ConvergenceWarning` inside its `"warnings"` list → the agent's
+own `record_convergence_decision` (Run A) or `record_model_proposal`
+(Runs B, C) reasoning explicitly references it (e.g. Run A: *"the model
+did not converge... I will try increasing the iterations for Logistic
+Regression first"*) → the agent re-proposes Logistic Regression with a
+higher `max_iter` → the warning is absent on the retry. This is the
+first live confirmation that the B+C design actually functions
+end-to-end, not just that the plumbing was theoretically capable of it.
+
+### 11.5 Finding: Run A isolates `max_iter`'s own effect cleanly; Runs B/C confound it with `C`
+
+Run A is the only one of the three where the retry changed **only**
+`max_iter`, leaving every other hyperparameter unchanged. Its result is
+worth stating plainly: raising `max_iter` from 100 to 500 silenced the
+warning **completely**, while leaving every reported metric — accuracy,
+precision, recall, F1, and the full confusion matrix — bit-identical to
+the pre-retry attempt. In this run, the iteration cap was a *reporting*
+problem (an honest "I can't certify convergence"), not an *accuracy*
+problem; the coefficients at 100 iterations were apparently already as
+good as at 500.
+
+Runs B and C, by contrast, both changed `max_iter` **and** `C` (to 0.1)
+in the same retry — the agent's own reasoning conflates the two (Run B:
+*"Increasing max_iter and adjusting C might yield a more stable
+result"*), so neither run can isolate which change actually drove their
+jump to recall 1.0 / precision 0.25 (versus Run A's unchanged 0.778 /
+0.25 after its `max_iter`-only retry). **Plausible inference, not
+proven:** since Run A's `max_iter`-only change produced no metric
+change at all, `C=0.1` (stronger regularization) is the more likely
+driver of Runs B/C's improved precision — but this is inferred by
+comparing across only 3 runs, not confirmed directly. A targeted
+follow-up (propose `C=0.1` alone, `max_iter` left at its default, and
+check whether recall still reaches 1.0 despite the warning still
+firing) would confirm or rule this out directly, and is flagged as a
+natural next data point rather than done this session.
+
+### 11.6 Finding: a new answer that dominates the project's prior typical outcome
+
+Runs B and C's final configuration — Logistic Regression, `C=0.1`,
+`max_iter=500`, `class_weight="balanced"` — reached recall = 1.0 at
+precision = 0.25. §10.1's six-run table's typical converged outcome was
+SVM (`kernel="rbf"`) at the same recall (1.0) but lower precision
+(0.18). This is a legitimate, citable improvement made possible
+specifically by exposing `max_iter` (and, per §11.5, plausibly `C`
+alongside it) — a configuration that was structurally unreachable
+before this session, since `max_iter` did not previously exist as
+something the agent could choose.
+
+### 11.7 Secondary observation, flagged as curious, not explained
+
+All three runs revisited Logistic Regression *after* trying Random
+Forest — a path shape (`LR → RF → LR-retry [→ SVM]`) that did not
+appear in any of §10.1's original six runs, and could not have, since
+there was previously no reason to propose Logistic Regression a second
+time. Separately: Run A's Random Forest step and Run C's Random Forest
+step (different `n_estimators`, 100 vs. 200, both `class_weight=
+"balanced"`) produced **bit-identical** metrics and confusion matrices,
+despite `RandomForestClassifier`'s `random_state` never being set
+anywhere in this project's schema — meaning sklearn's own internal
+randomness should, in principle, differ run to run. Noted here as an
+unexplained observation worth a future look, not chased down further
+this session.
+
+### 11.8 Updated summary table
+
+| Question | Answer, with appropriate caveats |
+|---|---|
+| Does the agent actually use `warnings`-list data from `train_model` to change its own behavior? | Yes — confirmed directly in all 3 runs; the agent's own reasoning text references the `ConvergenceWarning` and responds by raising `max_iter` on a retry. Documented fact from live runs, not inference. |
+| Does raising `max_iter` alone change the model's actual predictions? | In the one run that isolated it (Run A), no — metrics were bit-identical with and without the warning. Not yet confirmed as a general pattern; n=1 for this specific isolated comparison. |
+| Is `C`, not `max_iter`, the more likely driver of Runs B/C's improved precision? | Plausible inference from comparing 3 runs, not proven — a targeted single-variable follow-up run would confirm or rule this out. |
+| Does this fix outperform the project's prior typical converged outcome? | On this small sample, yes — recall 1.0 / precision 0.25 (Runs B, C) versus the prior typical 1.0 / 0.18 (§10.1). |
+| Is "the data reaches Gemini" the same claim as "Gemini reasons well about it"? | No — flagged explicitly before these runs, and worth restating: this session's 3/3 success rate is encouraging but not a guarantee of future behavior on every run. |
 
 ---
 

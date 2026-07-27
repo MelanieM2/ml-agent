@@ -5,7 +5,9 @@
 _Status: speculative, deferred, NOT IMPLEMENTED. Written 2026-07-13 as a
 deliberate evaluate-and-defer analysis, not a plan of record. Revisit only
 if `MAX_ITERATIONS` is raised significantly above its current default of
-10._
+15 (raised from 10 on 2026-07-27 — see Part 5, §5.9; still well below the
+20-30 range this section's cost concerns actually apply to, so this
+section's conclusion is unaffected by that specific change)._
 
 ---
 
@@ -77,7 +79,8 @@ different rates.
   itself proportional to *N*, and summing that from 1 to *N* gives an
   O(N²) total.
 
-At `MAX_ITERATIONS = 10`, this is a non-issue — the absolute token counts
+At `MAX_ITERATIONS = 15` (raised 2026-07-27, from the original 10 — see
+Part 5, §5.9), this is still a non-issue — the absolute token counts
 involved are small. The concern is purely about what happens if that
 ceiling is raised significantly (e.g. past 20–30), where the quadratic
 cumulative-cost curve starts to matter for budgeting, and where the linear
@@ -131,12 +134,13 @@ turn.
 
 ### Recommendation
 
-At `MAX_ITERATIONS = 10`, none of the above is worth building — real
+At `MAX_ITERATIONS = 15`, none of the above is worth building — real
 added complexity for a cost curve that's genuinely small at this scale.
-If `MAX_ITERATIONS` is ever raised significantly, option 4 (condensed
-scratchpad) is the one actually recommended: option 3 costs real search
-quality, and options 1/2 don't target the part of the problem that's
-actually growing (the changing tool-call history, not a static prefix).
+If `MAX_ITERATIONS` is ever raised significantly (past 20-30), option 4
+(condensed scratchpad) is the one actually recommended: option 3 costs
+real search quality, and options 1/2 don't target the part of the
+problem that's actually growing (the changing tool-call history, not a
+static prefix).
 
 This entire analysis is deferred, evaluated-not-implemented status — see
 TODO #4 in `context_ml-agent_2026-07-13.md` and the Detailed Session
@@ -726,6 +730,10 @@ to silence? something else entirely?) is a genuinely open design
 question, not yet even narrowed to a shortlist — flagged here explicitly
 as unresolved, for a future session to pick up.
 
+**Resolved 2026-07-27 — see Part 5.** The shortlist was narrowed to a
+decision (expose `max_iter`, let the agent reason about the warning and
+act on it directly) and verified against 3 live runs.
+
 **`test_tools.py` not yet reviewed against `train_model`'s new
 `"warnings"` return key.** §4.1's change alters `train_model`'s return
 shape. Whether this affects any existing assertion in `test_tools.py` —
@@ -733,3 +741,252 @@ including the `inspect.signature()`-based drift check described in Part
 3, §3.1's precedent — has not been checked. Explicitly deferred to the
 next working session, at Melanie's direct request, rather than folded in
 here.
+
+**Resolved 2026-07-27 — see Part 5, §5.1.** Reviewed at the start of the
+next session, as requested. Conclusion: no update needed — every
+assertion in `test_tools.py` operates on `inspect.signature()`, i.e. a
+function's *parameters*, and `"warnings"` is a new key in `train_model`'s
+*return value*, a dimension this file's tests have never inspected for
+any tool. `train_model`'s own parameter list (`model_type`,
+`hyperparameters`) is unchanged.
+
+
+<!--
+TECHNICAL_NOTES.md ADDITION — 2026-07-27 session
+-->
+
+---
+## Part 5: `max_iter` exposed as a hyperparameter; confirming the agent-reasoning pathway was already wired (2026-07-27)
+
+_Status: IMPLEMENTED and verified via 3 live runs (see
+`DATA_SCIENCE_ANALYSIS.md` §11). Directly resolves the two limitations
+named at the end of Part 4, §4.5: the undecided `ConvergenceWarning`
+shortlist, and the unreviewed `test_tools.py` question._
+
+### 5.1 `test_tools.py` review — the first item on this session's agenda
+
+Reviewed against the real, pasted current content of both `test_tools.py`
+and `trainer.py`. Every one of `test_tools.py`'s four tests operates on
+`_gemini_visible_params`, which wraps `inspect.signature()` — a
+function's declared *parameters*, never its return value.
+`train_model(model_type, hyperparameters)`'s signature is byte-for-byte
+unchanged from before Part 4's warning-capture work; only its *return*
+dict gained the `"warnings"` key. Conclusion: no update to
+`test_tools.py` was needed, and none was made. See Part 4's §4.5
+addendum for the same conclusion cross-referenced from that section.
+
+### 5.2 The `ConvergenceWarning` shortlist, narrowed to a decision
+
+Three options were discussed (full rationale for each in
+`DATA_SCIENCE_ANALYSIS.md` §11.1): (A) raise the `max_iter` default,
+silencing the warning outright; (B) let the agent reason about the
+warning using data Part 4 already made visible; (C) expose `max_iter` as
+a hyperparameter, giving the agent something concrete to act on.
+**Decided: B, using C as the acting mechanism — not A.** Option A was
+rejected specifically because it would have made §10's warning-based
+comparison methodology unreproducible on any future run.
+
+### 5.3 Schema change: `max_iter` added to `list_available_models`
+
+A single-site change to `tools.py`'s `list_available_models()`, adding
+one new entry to `logistic_regression`'s `hyperparameters` dict:
+
+```python
+"max_iter": {
+    "type": "int",
+    "range": [50, 1000],
+    "default": 100,
+    "description": (
+        "Max solver iterations (lbfgs) before giving up, whether or "
+        "not the fit has converged. Default (100) matches sklearn's "
+        "own default and reproduces this project's known "
+        "ConvergenceWarning behavior. Raise this if train_model's "
+        "returned 'warnings' list shows a ConvergenceWarning and you "
+        "want to try letting the solver run longer instead of "
+        "switching model types."
+    ),
+},
+```
+
+`range=[50, 1000]`/`default=100` are judgment calls, flagged as such:
+the default preserves today's exact behavior unless the agent
+deliberately chooses otherwise; 1000 is a generous but bounded ceiling,
+chosen to avoid runaway fit times rather than derived from any specific
+constraint.
+
+**Why this is the only site that needed changing.** Neither
+`TOOL_SCHEMAS["train_model"]` nor `TOOL_SCHEMAS["record_model_proposal"]`
+enumerates individual hyperparameter names — both declare
+`"hyperparameters"` generically as `{"type": "object", ...}`. `trainer.py`'s
+`validate_hyperparameters` is likewise already generic over whatever
+keys the active schema declares. Adding a new hyperparameter to an
+*existing* model type is therefore pure schema data, not a
+function-signature or dispatch-table change — confirmed directly against
+the real `tools.py`/`trainer.py` content, not assumed.
+
+### 5.4 Confirming option B required zero new code — traced directly through `gemini_client.py`
+
+Before treating option B as "already wired," `gemini_client.py`'s real
+content was read directly (not assumed from `agent.py`, which only
+*builds* the dispatch table and has no role in what happens during the
+loop). The relevant path, inside `run_agent_loop`, runs unconditionally
+on every tool call, independent of `log_iterations`:
+
+```python
+result = dispatch_table[tool_name](**tool_args)
+...
+function_response_part = types.Part.from_function_response(
+    name=tool_name,
+    response={"result": result},   # the full result dict, unfiltered
+)
+response = chat.send_message(function_response_part)
+```
+
+`train_model`'s complete return value — including `"warnings"` — is fed
+back to Gemini as-is, every turn, with no special-casing by tool name
+and no dependency on the logging feature. This means Part 4's
+warning-capture change (2026-07-24) already made the warning visible to
+Gemini's own reasoning automatically, three days before this session's
+`max_iter` addition gave the agent something to do about it. No changes
+to `gemini_client.py` were needed or made this session.
+
+### 5.5 Housekeeping: stale docstring corrected in `trainer.py`
+
+`Trainer.train_model`'s docstring (added Part 4, §4.1) described
+capturing all warning categories as "flagged for Melanie's confirmation"
+— language written into the proposed code *before* that confirmation
+happened, never updated afterward once it did (the actual decision was
+made and documented in Part 4, §4.1 itself, and in
+`DATA_SCIENCE_ANALYSIS.md`'s "Decisions resolved this session" section,
+2026-07-24). Corrected to state the settled rationale directly:
+
+```python
+Captures ALL warning categories raised during fit, not just
+ConvergenceWarning specifically — a deliberate, confirmed design
+choice (Melanie, 07-24) to keep this general-purpose rather than
+hardcoding today's one known case.
+```
+
+Documentation-only change; no behavior affected.
+
+### 5.6 Verified against 3 live runs
+
+All three runs (`DATA_SCIENCE_ANALYSIS.md` §11.3) show the full intended
+chain: `ConvergenceWarning` appears in `train_model`'s result → the
+agent's own `record_model_proposal`/`record_convergence_decision`
+reasoning references it explicitly → the agent re-proposes Logistic
+Regression with `max_iter` raised → the warning clears on retry. Full
+findings, including an unresolved confound between `max_iter` and `C` in
+two of the three runs, are in `DATA_SCIENCE_ANALYSIS.md` §11.5 — not
+duplicated here, per this file's existing convention of keeping
+live-run findings in `DATA_SCIENCE_ANALYSIS.md` and implementation
+details here.
+
+### 5.7 Not built this session, flagged for later
+
+**Confound follow-up.** A targeted single-variable run (`C=0.1` alone,
+`max_iter` left at default) to isolate which change actually drove Runs
+B/C's improved precision — `DATA_SCIENCE_ANALYSIS.md` §11.5.
+
+**`Agent-decisions.md` generator.** Raised this session as a related but
+distinct idea: a post-hoc, human-readable report of
+`record_model_proposal`/`record_convergence_decision` reasoning per run,
+written incrementally (open-at-start, append-per-iteration) rather than
+built-then-written-once, as partial mitigation for Part 4 §4.5's
+invisible-failed-run limitation. Architecture agreed (an injected
+callback into `run_agent_loop`, e.g. `on_decision`, preserving that
+function's existing no-direct-file-I/O principle — the same shape
+already anticipated for the still-deferred human-in-the-loop hook) but
+not implemented; deferred to be designed together with the
+human-in-the-loop hook itself, since both need the same kind of
+injection point in the same loop.
+
+### 5.8 Quick reference: adding a new dataset
+
+Referenced directly from `main.py`'s terminal output (a printed pointer
+to this section), added at Melanie's request so anyone extending the
+registry has a documented starting point rather than needing to
+reverse-engineer it from `dataset.py`'s source alone.
+
+Three steps, all inside `dataset.py`; nothing elsewhere needs to change
+(confirmed this session — `agent.py`, `main.py`, and everything
+downstream reads the registry generically, never a hardcoded name list):
+
+1. **Write a loader function** returning `tuple[pd.DataFrame, pd.Series]`
+   — features, then target — matching the shape of
+   `load_breast_cancer_dataset`/`load_climate_crashes_dataset`.
+2. **Add one `DatasetSpec(...)` entry** to `DATASET_LOADERS`, giving the
+   new loader, the dataset's `pos_label`, and a short `description`.
+3. **Verify `pos_label` against the dataset's own documentation** before
+   trusting it — this is the one genuine diligence step, not a code
+   complexity. See `load_climate_crashes_dataset`'s docstring for the
+   precedent: it cross-checks the remapped label's count (46) directly
+   against the dataset's own documented failure count ("46 of 540
+   simulations failed") before treating the mapping as correct, rather
+   than assuming either raw label meant "positive."
+
+**Constraint, not yet lifted:** this registry — and everything built on
+it (`Trainer.evaluate_model`'s `precision_score`/`recall_score`/`f1_score`
+calls, all using `average="binary"` with a single `pos_label`) — assumes
+**binary classification**. A multi-class dataset would need real changes
+beyond the registry, not just a new entry.
+
+**Not yet built:** a terminal-only way to register a dataset without
+editing `dataset.py` (e.g. a `--register-dataset` flag pointing at a
+CSV). Raised this session as a possible future feature, explicitly not
+scoped or committed to yet.
+
+### 5.9 `MAX_ITERATIONS` raised from 10 to 15 — closing the 07-12 open decision
+
+**The original decision, and its explicit condition for revisiting.**
+`gemini_client.py`'s own comment, dating to the 07-12 session, set
+`MAX_ITERATIONS = 10` deliberately small — not as an estimate of how many
+iterations a real run needs, but as a cheap debugging safety net: if the
+loop's convergence logic were silently broken (e.g. never actually
+stopping), a small cap would surface that within ~10 quick steps and a
+few seconds, rather than after a much larger, costlier run. The same
+comment named the exact condition for raising it: "once the loop is
+trusted end-to-end."
+
+**Why that condition is now judged met.** By this session, 9 live runs
+across two sessions have completed with coherent, sensible tool
+sequencing: the original six-run comparison (2026-07-24,
+`DATA_SCIENCE_ANALYSIS.md` §10.1) plus 3 more this session verifying the
+`max_iter` hyperparameter addition (§11.3 of that file). None showed the
+loop failing to terminate, looping incoherently, or any other sign of a
+broken convergence check — the exact failure mode the small cap was
+guarding against.
+
+**The concrete trigger for actually making the change now, rather than
+just noting the condition was met.** A real `main.py` run this session
+hit `status: "max_iterations_reached"` at exactly 10 iterations, having
+just proposed (but not yet trained) a legitimate Logistic Regression
+retry with `max_iter=1000`, directly addressing an earlier
+`ConvergenceWarning` — i.e., the cap cut off real, in-progress,
+sensible work, not a bug. Every run examined this session needed
+roughly 10-14 iterations for a complete propose→train→evaluate→decide
+cycle across 2-3 model types; 10 is demonstrably tight for a typical
+*complete* run, not just a theoretical edge case.
+
+**Change made:** `MAX_ITERATIONS = 10` → `15`, in `gemini_client.py`,
+with the code comment updated to record this resolution rather than
+just being deleted (git history preserves the original 07-12 rationale
+regardless, but an updated comment keeps that context visible to anyone
+reading the current file, not just anyone who goes looking at git
+blame).
+
+**What this does *not* change, checked directly rather than assumed:**
+Part 1's conversation-history cost-scaling analysis is explicitly scoped
+to concerns starting "past 20-30" iterations; 15 remains well below that
+threshold, so Part 1's "non-issue at this scale" conclusion still holds
+— its stale references to "10" were updated to "15" alongside this
+change, for accuracy, but its substantive analysis and recommendation
+are unaffected.
+
+**Not addressed here, flagged as a separate, smaller possible follow-up:**
+whether 15 itself is the right number, versus e.g. 20, is still
+somewhat of a judgment call rather than a precisely derived figure — it
+comfortably covers every run observed so far, with some margin, while
+staying well clear of Part 1's cost-scaling concern range. Worth
+revisiting if a future run legitimately needs more than 15 for a
+complete cycle.
