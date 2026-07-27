@@ -61,6 +61,22 @@ def list_available_models() -> dict[str, Any]:
                             "frequency - relevant for imbalanced data."
                         ),
                     },
+                    "max_iter": {
+                        "type": "int",
+                        "range": [50, 1000],
+                        "default": 100,
+                        "description": (
+                            "Max solver iterations (lbfgs) before giving "
+                            "up, whether or not the fit has converged. "
+                            "Default (100) matches sklearn's own default "
+                            "and reproduces this project's known "
+                            "ConvergenceWarning behavior. Raise this if "
+                            "train_model's returned 'warnings' list shows "
+                            "a ConvergenceWarning and you want to try "
+                            "letting the solver run longer instead of "
+                            "switching model types."
+                        ),
+                    },
                 },
             },
             "random_forest": {
