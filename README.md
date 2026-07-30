@@ -1,6 +1,6 @@
 # ml-agent
 
-_Last updated: 2026-07-27_
+_Last updated: 2026-07-30_
 
 Agentic ML experimentation assistant — an LLM (Gemini) orchestrates dataset inspection, model proposal, training, and evaluation over scikit-learn via native function-calling, iterating toward a target metric in a supervised loop.
 
@@ -8,12 +8,12 @@ Agentic ML experimentation assistant — an LLM (Gemini) orchestrates dataset in
 
 - `dataset.py` — ✅ done and tested.
 - `tools.py` — ✅ done (5 tool schemas + inclusive-bounds convention documented; `TOOL_FUNCTIONS` name→callable mapping added 2026-07-15, now actively reused by `agent.py`'s dispatch-table wiring — see "Project structure" below). **`max_iter` exposed as a tunable Logistic Regression hyperparameter (2026-07-27)** — gives the agent a concrete lever to act on the `ConvergenceWarning` `trainer.py` already surfaces — see "Closing the `ConvergenceWarning` shortlist" below.
-- `trainer.py` — ✅ done. Real sklearn fit/predict logic implemented: `train_model` fits the correct estimator per `model_type` via a registry lookup against `tools.py`'s schema; `evaluate_model` computes accuracy, precision, recall, f1, and a correctly-oriented confusion matrix using `pos_label`. **Fit-time warning capture added (2026-07-24)** — `train_model` now returns any warning scikit-learn raised during fitting (e.g. a `ConvergenceWarning`), never just silently letting it print to the terminal — see "Fit-time warning capture" below.
-- `agent.py` — ✅ **orchestration loop wired end-to-end (2026-07-17), verified via 3 real live runs.** `build_dispatch_table` now returns a `DispatchResult` (dispatch table + the run's `X`/`y`), and `run_session(dataset_name, optimization_target)` connects it, `inspect_dataset`, and `gemini_client.run_agent_loop` into one real, callable entry point — see "`agent.py` — wiring the dispatch table" below. `run_session` also now forwards an optional `log_iterations` flag (2026-07-19) straight through to `run_agent_loop` — see "Per-iteration logging" below.
+- `trainer.py` — ✅ done. Real sklearn fit/predict logic implemented: `train_model` fits the correct estimator per `model_type` via a registry lookup against `tools.py`'s schema; `evaluate_model` computes accuracy, precision, recall, f1, and a correctly-oriented confusion matrix using `pos_label`. **Fit-time warning capture added (2026-07-24)** — `train_model` now returns any warning scikit-learn raised during fitting (e.g. a `ConvergenceWarning`), never just silently letting it print to the terminal — see "Fit-time warning capture" below. **`random_state` threaded into every estimator (2026-07-29)** — closes a real reproducibility bug: `RandomForestClassifier` was previously instantiated with no seed at all, so identical hyperparameters could (and did) produce different results across separate runs — see "Reproducibility: seeding every estimator" below.
+- `agent.py` — ✅ **orchestration loop wired end-to-end (2026-07-17), verified via 3 real live runs.** `build_dispatch_table` now returns a `DispatchResult` (dispatch table + the run's `X`/`y`), and `run_session(dataset_name, optimization_target)` connects it, `inspect_dataset`, and `gemini_client.run_agent_loop` into one real, callable entry point — see "`agent.py` — wiring the dispatch table" below. `run_session` also now forwards an optional `log_iterations` flag (2026-07-19) straight through to `run_agent_loop` — see "Per-iteration logging" below. **`build_dispatch_table`'s `random_state` is now also bound into `Trainer.train_model` (2026-07-29)**, not just the train/test split — see "Reproducibility: seeding every estimator" below.
 - `gemini_client.py` — ✅ **done and verified.** Implements the full agent loop: sends dataset context + tool schemas to Gemini, dispatches whichever tool call comes back, feeds results back, repeats until convergence or a max-iterations guard. Verified via multiple real end-to-end runs across both datasets (see "Data Science Notes" below). **Now also supports optional per-iteration logging (2026-07-19)** — see "Per-iteration logging" below. **`MAX_ITERATIONS` raised from 10 to 15 (2026-07-27)** — the 07-12 debugging-safety-net rationale for keeping it small was explicitly conditioned on "once the loop is trusted end-to-end"; 9 live runs across two sessions, plus a `main.py` run that hit the old ceiling mid-retry on legitimate in-progress work, met that condition — see "`gemini_client.py` — the agent loop" below.
 - `test_tools.py` — ✅ **done, 12 tests passing (2026-07-15, extended 2026-07-19).** The `TOOL_SCHEMAS` ↔ real-function signature drift check, using `inspect.signature()`, plus a guard on the two dispatch-table override keys. See "`test_tools.py` — the schema/function drift check" below. **Review resolved (2026-07-27):** `train_model`'s new `warnings` return key needed no update here — every assertion in this file inspects a function's *parameters* via `inspect.signature()`, never its return value, and `train_model`'s own parameter list is unchanged.
-- **`compare_runs.py` (2026-07-24) — ✅ new, done, verified against 6 real live runs, plus 3 more this session.** Turns several persisted `results/smoke_test_log_*.json` files into one `comparison_<timestamp>.json`, summarizing each run's model sequence, final metrics, any warnings encountered, and elapsed time — see "Cross-run comparison" below.
-- **`main.py` (2026-07-27) — ✅ new, done.** The real, committed public entry point — `run_smoke_test.py` (gitignored, hardcoded) was never reachable by anyone cloning the repo. Interactive/CLI hybrid: prompts for `--dataset`/`--target` only when omitted, everything else silently defaults. See "`main.py` — the CLI entry point" below.
+- **`compare_runs.py` (2026-07-24) — ✅ done, verified against 6 real live runs, plus several more since.** Turns several persisted run files into one `comparison_<timestamp>_<dataset>.json`, summarizing each run's model sequence, final metrics, any warnings encountered, and elapsed time. **Renamed and dataset-scoped (2026-07-29):** the underlying files are now `result_log_<timestamp>_<dataset_name>.json` (was `smoke_test_log_<timestamp>.json`), and `build_comparison` now accepts an optional `dataset_name` filter — comparing runs across two different datasets was judged never acceptable, since their metrics aren't comparable against different data. See "Cross-run comparison" below.
+- **`main.py` (2026-07-27; extended 2026-07-29) — ✅ done.** The real, committed public entry point — `run_smoke_test.py` (gitignored, hardcoded) was never reachable by anyone cloning the repo. Interactive/CLI hybrid: prompts for `--dataset`/`--target` only when omitted, everything else silently defaults. **New `compare` subcommand (2026-07-29):** `python main.py compare --dataset NAME` surfaces `compare_runs.py` under the same entry point as `run`, without requiring a separate script invocation to be discovered. See "`main.py` — the CLI entry point" below.
 - **Human-in-the-loop hook (2026-07-19): scope agreed, implementation still deferred.** The confirmation step described below (Category B → Category A handoff) will combine hyperparameter edge-case flagging, reasoning/action contradiction detection, and stalled/repeated-proposal detection — deliberately not a per-proposal approval gate, and deliberately not limited to reviewing only the final result. Build is intentionally deferred until the project is close to a finished, working state, not before — see "Roadmap context" below. **A related, distinct idea raised 2026-07-27:** a post-hoc `Agent-decisions.md` generator (human-readable decision/reasoning report per run, written incrementally) — architecture agreed, not built; see "Roadmap context."
 - Also not yet started: `test_trainer.py`, `AGENTS.md`, and a human-friendly viewer for the JSON result files (design agreed 2026-07-24 — auto-detects a single-run vs. a comparison file by name, renders as Markdown — not yet built).
 
@@ -52,6 +52,7 @@ This same principle extends deeper into the codebase over time:
 - Into `agent.py`'s `run_session` (2026-07-17): **which class is "positive" is a fact, resolved once per dataset — but what metric to optimize for (recall, precision, accuracy) is a judgment call**, made once per *run*, not baked into the dataset registry alongside `pos_label`. This is why `optimization_target` is a plain parameter on `run_session`, not a dataset fact — see "`agent.py` — wiring the dispatch table" below for the full reasoning, and for what "optimizing for recall" concretely means on this project's primary dataset.
 - Into `run_agent_loop`'s new `log_iterations` flag (2026-07-19): **whether to log is a caller's choice, not something the loop decides for itself.** `run_session` makes no logging decisions of its own — it just forwards whatever the caller asked for, keeping the same separation of concerns as everywhere else in this list.
 - Into `main.py` (2026-07-27): **`optimization_target` is now constrained to the exact four metrics `evaluate_model` actually computes** (`recall`/`precision`/`accuracy`/`f1`), closing a gap that existed as long as it was unvalidated free text: a typo'd or invented target would previously reach Gemini's prompt with no connection to what the tool results could actually support — not malicious, just silently disconnected from reality. See "`main.py` — the CLI entry point" below.
+- Into `trainer.py`/`agent.py` (2026-07-29): **reproducibility is a single, shared knob, not two.** `--random-state` already existed for the train/test split; it now also seeds every model's own internal randomness (`RandomForestClassifier`'s bagging, in particular). A second, separate seed for "the models" specifically was considered and deliberately rejected for now — see "Reproducibility: seeding every estimator" below for the real trade-off this gives up (the ability to isolate split-variance from model-variance), and why it's an acceptable one given this project's actual goal.
 
 ---
 
@@ -379,7 +380,7 @@ The full log is returned under `result["log"]` — but only when `log_iterations
 
 ---
 
-## Cross-run comparison (2026-07-24)
+## Cross-run comparison (2026-07-24; renamed and dataset-scoped 2026-07-29)
 
 ### Why this exists
 
@@ -388,7 +389,7 @@ With runs now persisted individually instead of overwritten, the original motiva
 ### How it works
 
 ```
-results/*.json (several completed runs)
+results/*.json (several completed runs, ONE dataset)
         │
         ▼
 summarize_run()  — pure function, one run in, one flat row out
@@ -397,22 +398,43 @@ summarize_run()  — pure function, one run in, one flat row out
 list of per-run summary rows
         │
         ▼
-results/comparison_<timestamp>.json  — one row per run
+results/comparison_<timestamp>_<dataset>.json  — one row per run
 ```
 
 `summarize_run(run_data, source_file=None)` reads one already-loaded run dict — no file I/O, no live API call — and extracts: `status`, `iterations`, `elapsed_seconds`, the ordered `model_sequence` actually tried, the `final_model_type` and its metrics, every `warnings_encountered` entry (flattened, with the iteration and model type each fired on), and the run's final `convergence_reasoning`. Kept as a pure function of its input dict, for the same reason `validate_split` and `validate_hyperparameters` are kept standalone elsewhere in this project: testable directly against a hand-built dict, with no dataset, `Trainer`, or live API call required.
 
-`build_comparison(results_dir=Path("results"))` scans for every `smoke_test_log_*.json` file present and calls `summarize_run` on each — not capped at any particular count, whether that's 2 files or 20.
+`build_comparison(results_dir=Path("results"), dataset_name=None)` scans for matching result files and calls `summarize_run` on each — not capped at any particular count, whether that's 2 files or 20.
 
 **Two judgment calls worth stating plainly** — true of every run observed so far, but not independently verified as universal: "final model" is read as the *last* `evaluate_model` call in a run's log, not cross-checked against the wording of its convergence decision; and `convergence_reasoning` is taken from the *last* `record_convergence_decision` entry seen, even on a run that hit `max_iterations` without ever setting `continue_iterating=False`.
 
+### Renamed and dataset-scoped (2026-07-29)
+
+Once a second dataset (Breast Cancer) came into regular use, two real problems surfaced with the original `smoke_test_log_<timestamp>.json` / `comparison_<timestamp>.json` convention:
+
+1. Nothing in either filename indicated which dataset it belonged to.
+2. `build_comparison`'s original unfiltered scan would silently mix both datasets' runs into one comparison file — combining metrics (accuracy/precision/recall/f1) computed against genuinely different data, which was judged never acceptable, not even as an opt-in "compare everything" mode.
+
+**Resolved:** run files are now named `result_log_<YYYY_MM_DD_HHMMSS>_<dataset_name>.json` — dataset name deliberately placed *after* the timestamp, not before, so a whole-filename string sort still sorts chronologically across every dataset (putting the dataset name first would have grouped, say, all `breast_cancer` runs before all `climate` runs regardless of when they actually ran — `build_comparison`'s own sort relies on this). `build_comparison` now accepts an optional `dataset_name` filter, restricting its scan to `result_log_*_<dataset_name>.json`; `main.py`'s `compare` subcommand (see "`main.py`" below) makes this filter effectively mandatory for its users, never silently defaulting to "everything." Pre-existing files were migrated with a one-time script (`rename_results.py`, gitignored — not project code, a throwaway migration helper).
+
+### Discoverability: the `compare` subcommand (2026-07-29)
+
+`compare_runs.py`'s existence as a separate script meant it was easy for a first-time reader to miss entirely. `main.py` now exposes the same capability as a sibling subcommand:
+
+```
+python main.py                          # (implicit "run" — unchanged from before)
+python main.py run --dataset climate    # explicit form, same result
+python main.py compare --dataset climate
+```
+
+`--dataset` is required for `compare` — if omitted or misspelled, it prints a warning explaining why (mixing datasets isn't allowed) and falls back to the same interactive picker `run` already uses, rather than a bare argparse usage error. The standalone `python -m ml_agent.compare_runs` invocation still exists and still scans everything unfiltered by default — kept for now as a lower-level, less-restricted path, since `main.py compare` is the primary, documented, gated way to do this going forward.
+
 ### Verified against real data
 
-Across six real Climate Crashes runs from a single evening: correctly distinguished the one run that never proposed Logistic Regression — and so never hit the `ConvergenceWarning` — from the five that did. Full run-by-run findings, including a discussion of run-to-run path variation, are in [`DATA_SCIENCE_ANALYSIS.md`](./DATA_SCIENCE_ANALYSIS.md).
+Across six real Climate Crashes runs from a single evening: correctly distinguished the one run that never proposed Logistic Regression — and so never hit the `ConvergenceWarning` — from the five that did. Since then, verified again post-rename against 12 real Climate Crashes runs and 4 Breast Cancer runs, correctly kept separate by dataset. Full run-by-run findings, including a discussion of run-to-run path variation, are in [`DATA_SCIENCE_ANALYSIS.md`](./DATA_SCIENCE_ANALYSIS.md).
 
-### Known limitation, not fixed
+### Known limitation, reproduced and documented, still not fixed
 
-A run that crashes before completing (e.g. hitting the Gemini API's own rate limit) writes no file at all — a failed attempt is currently invisible to this comparison, not just excluded from it. Accepted for now; see "Roadmap context."
+A run that crashes before completing (e.g. hitting the Gemini API's own free-tier rate limit — a real 429 `RESOURCE_EXHAUSTED` error, reproduced 2026-07-29 by running two sessions back-to-back within the same minute) writes no file at all — a failed attempt is currently invisible to this comparison, not just excluded from it. `main.py` now prints a note at startup warning that back-to-back runs can hit this limit. The underlying gap remains an accepted limitation, not a planned fix; see "Roadmap context."
 
 ---
 
@@ -507,6 +529,61 @@ All three runs (Climate Crashes, `optimization_target="recall"`) show the intend
 
 **Worth stating plainly, not overclaiming:** this confirms the data *reaches* Gemini and that the mechanism functions end-to-end on 3 real runs — it isn't a guarantee that every future run will reason about a warning this well. "Wired" and "reasons about it well" are different claims.
 
+### The `max_iter`-vs-`C` confound, isolated (2026-07-29)
+
+**Correction to how this was first described:** the two confounded runs above were originally written up as reaching "a better precision" — this was imprecise. Re-checking the actual numbers: precision was **0.25 in every relevant run** (the original baseline, the confounded runs, and the isolation run below) — it never moved. The metric that actually changed was **recall**: 0.778 in the run that changed `max_iter` alone, vs. 1.0 in every run that also changed `C`.
+
+A controlled follow-up run isolated `C` alone (`C=0.1`, `max_iter` left at its untouched default of 100) — deliberately *not* fixing the convergence issue, to separate the two effects cleanly:
+
+```
+                                   warning fires?   recall   precision
+max_iter changed alone (isolated) →     no      →  0.778  →  0.25
+max_iter + C changed together     →     no      →  1.0    →  0.25
+C changed alone (isolation run)   →    YES      →  1.0    →  0.25
+```
+
+The isolation run's `ConvergenceWarning` still fired (expected — `max_iter` was untouched), yet recall still jumped to 1.0, matching the runs where `C` and `max_iter` moved together. **This confirms `C` — not `max_iter` — drove the recall improvement, independent of convergence status.** `max_iter` only resolves whether sklearn's solver believes it converged; it does not by itself change *what the model predicts*. `C` (inverse regularization strength) is what actually reshapes the decision boundary. The warning and prediction quality are decoupled: a model can still be "unconverged" by sklearn's own internal criterion while making the same predictions as one that isn't.
+
+This is a genuine causal-isolation finding, not just an observed correlation — a controlled, single-variable follow-up, in the same spirit this project treats as most valuable for its data-science content (see "Data Science Notes" in `DATA_SCIENCE_ANALYSIS.md`). A natural further extension — sweeping `C` across several values (e.g. `1.0, 0.5, 0.1, 0.01`) with `max_iter` held constant, to characterize the shape of the relationship rather than just its direction — is noted as a low-priority future addition; see "Roadmap context."
+
+---
+
+## Reproducibility: seeding every estimator (2026-07-29)
+
+### The bug, found via a real anomaly, not a code review
+
+Running Breast Cancer sessions back-to-back surfaced something that looked like reproducible behavior at first, then contradicted itself: three separate `random_forest` calls, each with *different* hyperparameters (library defaults; `n_estimators=200`; `n_estimators=200, max_depth=10`), all produced the exact same recall and confusion matrix — suggestive of a fixed seed making RF insensitive to those particular hyperparameter changes. Then a fourth run, using the *exact same* hyperparameters as the very first of those three, produced a **different** result.
+
+Checked directly against `trainer.py`'s real code, not inferred: `estimator = estimator_class(**hyperparameters)` — every estimator was instantiated with only whatever `tools.py`'s schema allows Gemini to tune (`n_estimators`, `max_depth`, `class_weight` for Random Forest; none of them `random_state`). `RandomForestClassifier` therefore always ran with sklearn's own default, `random_state=None`, pulling from numpy's global RNG — freshly seeded differently in every separate process. The three matching results were coincidence (a small, strongly-separable dataset where these particular hyperparameter changes happened not to matter), not evidence of determinism; the fourth run was the real behavior showing through.
+
+`LogisticRegression`'s `lbfgs` solver looked reproducible the entire time for a different, unrelated reason: it's a deterministic optimizer solving a fixed convex objective against a fixed data split — no bootstrap sampling, no per-split feature randomness — so it never needed a seed to behave consistently. It was never actually seeded either; it simply didn't need to be.
+
+### The fix
+
+`Trainer.train_model` now accepts a keyword-only `random_state` parameter (default `42`), passed into *every* estimator's constructor — `LogisticRegression`, `RandomForestClassifier`, and `SVC` all accept this kwarg, so no per-model-type branching is needed:
+
+```python
+estimator = estimator_class(**hyperparameters, random_state=random_state)
+```
+
+Deliberately **not** exposed as a Gemini-tunable hyperparameter in `tools.py`'s schema — it's a reproducibility knob, not a modeling choice the agent should be making run to run (same fact-vs-judgment separation as `pos_label` and `optimization_target` elsewhere — see "Core architectural principle" above). `build_dispatch_table` threads the *same* `random_state` value already used for the train/test split into this new parameter via `functools.partial`, rather than introducing a second, separate seed:
+
+```python
+bound_train = partial(
+    trainer.train_model,
+    X_train=X_train, y_train=y_train,
+    random_state=random_state,
+)
+```
+
+### A deliberate trade-off, decided rather than defaulted into
+
+A genuinely separate design — a second, independent `--model-random-state` flag (defaulting to match `--random-state`, so nothing changes for a typical user) — was considered instead. The single-shared-seed design that was actually built is simpler (one flag, one mental model, full end-to-end reproducibility from one number) but gives up the ability to isolate "how much does the split affect results" from "how much does a model's own internal randomness affect results" — changing `--random-state` moves both at once. Given this project's actual goal (a working data-science agent, not a formal variance study), the single-seed design was judged the right call for now. The two-seed alternative is kept as a low-priority future item; see "Roadmap context."
+
+### Verified against real data
+
+Confirmed via two Breast Cancer runs with `--random-state 42` (the default): despite using different hyperparameter combinations, `random_forest` now produces the identical result across both — recall 0.9444, confusion matrix `[[40,2],[4,68]]` in both. This is the specific behavior the fix was meant to produce, and the confusion matrix differs from any pre-fix run (expected — `random_state=42` is a genuinely different seed than sklearn's old unseeded default), while now agreeing with itself run to run.
+
 ---
 
 ## `Trainer` — model storage and encapsulation
@@ -583,7 +660,11 @@ def build_dispatch_table(
     validate_split(y_train, y_test, pos_label, min_count=5)
 
     trainer = Trainer()
-    bound_train = partial(trainer.train_model, X_train=X_train, y_train=y_train)
+    bound_train = partial(
+        trainer.train_model,
+        X_train=X_train, y_train=y_train,
+        random_state=random_state,  # also seeds every estimator — see
+    )                                # "Reproducibility" above (2026-07-29)
     bound_evaluate = partial(
         trainer.evaluate_model, X_test=X_test, y_test=y_test, pos_label=pos_label
     )
@@ -651,11 +732,11 @@ The orchestration loop itself is wired and verified (see "Data Science Notes" be
 
 ---
 
-## `main.py` — the CLI entry point (2026-07-27)
+## `main.py` — the CLI entry point (2026-07-27; extended 2026-07-29)
 
 ### Why this needed building specifically
 
-`run_smoke_test.py` is gitignored — meaning it was, and remains, invisible to anyone cloning this repo. Before this session, there was no committed way for a stranger to actually *run* a session at all, regardless of how complete `run_session` itself already was. `main.py` is that missing public entry point; it adds no new orchestration logic of its own — it asks a real person the two genuine judgment calls `run_session` needs, then calls it exactly the way `run_smoke_test.py` already does.
+`run_smoke_test.py` is gitignored — meaning it was, and remains, invisible to anyone cloning this repo. Before the 2026-07-27 session, there was no committed way for a stranger to actually *run* a session at all, regardless of how complete `run_session` itself already was. `main.py` is that missing public entry point; it adds no new orchestration logic of its own — it asks a real person the two genuine judgment calls `run_session` needs, then calls it exactly the way `run_smoke_test.py` already does.
 
 ### How the dataset menu stays in sync with the registry, automatically
 
@@ -698,7 +779,7 @@ Adding a new dataset means writing one loader function and one `DatasetSpec` ent
 
 ### What's a genuine judgment call vs. a secondary knob
 
-`--dataset`/`--target` prompt interactively when omitted — these are the two facts/judgment-calls `run_session` genuinely needs a person to supply (see "Core architectural principle" above). `--target` is constrained to the exact four metrics `evaluate_model` computes (`recall`/`precision`/`accuracy`/`f1`), not free text — see the new bullet under "Core architectural principle" above for why. Everything else (`--model`, `--max-iterations`, `--random-state`, `--log-iterations`) silently uses `run_session`'s own defaults unless explicitly overridden — no prompts, no interruption to a normal run. The effective configuration actually used is printed once, at the start of every run, and persisted into the saved result file's `config` key — discoverable without ever pausing execution to ask:
+`--dataset`/`--target` prompt interactively when omitted — these are the two facts/judgment-calls `run_session` genuinely needs a person to supply (see "Core architectural principle" above). `--target` is constrained to the exact four metrics `evaluate_model` computes (`recall`/`precision`/`accuracy`/`f1`), not free text. Everything else (`--model`, `--max-iterations`, `--random-state`, `--log-iterations`) silently uses `run_session`'s own defaults unless explicitly overridden — no prompts, no interruption to a normal run. The effective configuration actually used is printed once, at the start of every run, and persisted into the saved result file's `config` key — discoverable without ever pausing execution to ask:
 
 ```
 Running: dataset=climate, target=recall, model=gemini-3.1-flash-lite,
@@ -709,9 +790,31 @@ max_iterations=15, random_state=42, log_iterations=True
 
 `--log-iterations` defaults to `True` here — deliberately different from `run_session`'s own library default of `False` — since a first-time user benefits from seeing the agent's full reasoning trail, and it can be turned off with `--no-log-iterations` for a quieter run. Unlike `run_smoke_test.py`, `main.py` persists the result to `results/` unconditionally, even on a quiet run, rather than gating the save behind `log_iterations` — losing a run's outcome entirely just because someone wanted less terminal output was judged an avoidable loss.
 
-### Verified against a real live run
+### The `compare` subcommand (2026-07-29)
 
-Confirmed working end-to-end: interactive dataset/target prompts, the printed config summary, the full run through `run_session`, and persistence to `results/smoke_test_log_<timestamp>.json` — same naming convention as `run_smoke_test.py`, deliberately, so both entry points feed the same directory `compare_runs.py` already scans.
+`main.py` now handles two subcommands under one entry point, without breaking any existing invocation:
+
+```
+python main.py                          # implicit "run" — unchanged from before this session
+python main.py run --dataset climate    # explicit "run", identical result
+python main.py compare --dataset climate
+```
+
+The first CLI token is sniffed before argparse ever sees it: `"compare"` hands off entirely to a small dedicated parser and returns, never touching `run_session`; `"run"` has that one token stripped and everything proceeds exactly as it did before; anything else (or nothing) proceeds exactly as it always has. This was a deliberate choice over requiring `run` as an explicit subcommand everywhere (the more conventional argparse pattern) — with the project not yet public and no existing users besides its author, retraining muscle memory for zero benefit was judged not worth it; this can be revisited if/when the project goes public.
+
+`compare` requires `--dataset` — comparing across two different datasets would mix incomparable metrics into one file, which is never allowed (see "Cross-run comparison" above). If omitted or misspelled, it prints a warning and falls back to the same interactive picker `run` already uses, rather than a bare argparse error. Output is always named `comparison_<timestamp>_<dataset>.json`.
+
+### Free-tier rate limit note (2026-07-29)
+
+Running sessions back-to-back can exceed the Gemini API's free-tier per-minute quota, surfacing as an uncaught `429 RESOURCE_EXHAUSTED` error partway through a run — and since this happens before the result is persisted, the run leaves no file behind at all (see "Cross-run comparison" → "Known limitation" above). `main.py` now prints a note about this at startup, alongside the existing "want to add a new dataset?" pointer.
+
+### Renamed results-file convention (2026-07-29)
+
+`results/smoke_test_log_<timestamp>.json` → `results/result_log_<timestamp>_<dataset_name>.json`. See "Cross-run comparison" above for the full reasoning (why the dataset name comes after the timestamp, not before, and how pre-existing files were migrated).
+
+### Verified against real live runs
+
+Confirmed working end-to-end across both datasets: interactive dataset/target prompts, the printed config summary, the full run through `run_session`, and persistence under the new naming convention. The `compare` subcommand verified against real accumulated data: 12 Climate Crashes runs and 4 Breast Cancer runs, each correctly kept separate.
 
 ---
 
@@ -730,17 +833,18 @@ Confirmed working end-to-end: interactive dataset/target prompts, the printed co
 ├── README.md
 ├── SECURITY.md
 ├── TECHNICAL_NOTES.md
-├── main.py                 # ✅ CLI entry point (2026-07-27) — real public replacement for run_smoke_test.py's role
+├── main.py                 # ✅ CLI entry point (2026-07-27) — real public replacement for run_smoke_test.py's role; 'compare' subcommand + rate-limit note added (2026-07-29)
 ├── ml_agent/
 │   ├── __init__.py
-│   ├── agent.py             # ✅ orchestration loop wired end-to-end (2026-07-17); log_iterations threaded through (2026-07-19)
-│   ├── compare_runs.py      # ✅ turns several results/smoke_test_log_*.json runs into one comparison_<timestamp>.json
+│   ├── agent.py             # ✅ orchestration loop wired end-to-end (2026-07-17); log_iterations threaded through (2026-07-19); random_state now also bound into Trainer.train_model (2026-07-29)
+│   ├── compare_runs.py      # ✅ turns several results/result_log_*.json runs (one dataset at a time) into one comparison_<timestamp>_<dataset>.json
 │   ├── dataset.py           # ✅ done — dataset-agnostic loading + inspection
 │   ├── gemini_client.py     # ✅ done — Gemini client + function-call dispatch loop, verified; per-iteration logging + format_log (2026-07-19); MAX_ITERATIONS raised 10→15 (2026-07-27)
 │   ├── tools.py              # ✅ done — Gemini function-calling tool schemas + TOOL_FUNCTIONS; max_iter hyperparameter added (2026-07-27)
-│   └── trainer.py            # ✅ done — storage, validation, real sklearn fit/predict/evaluate; fit-time warning capture (2026-07-24)
+│   └── trainer.py            # ✅ done — storage, validation, real sklearn fit/predict/evaluate; fit-time warning capture (2026-07-24); random_state threaded into every estimator for reproducibility (2026-07-29)
 ├── pyproject.toml
-├── results/                   # gitignored; one smoke_test_log_<timestamp>.json per run (2026-07-24: no longer overwritten; written by both run_smoke_test.py and main.py), plus comparison_<timestamp>.json output from compare_runs.py
+├── rename_results.py         # one-time migration script (2026-07-29), gitignored — not project code; renamed pre-existing results/ files to the result_log_*_<dataset>.json convention
+├── results/                   # gitignored; one result_log_<timestamp>_<dataset_name>.json per run (2026-07-29 naming; was smoke_test_log_<timestamp>.json), plus comparison_<timestamp>_<dataset>.json output from compare_runs.py
 ├── run_smoke_test.py         # manual live-API smoke test of run_session(); gitignored; superseded by main.py as the real entry point, kept for quick manual debugging
 ├── smoke_test.py              # isolated schema-construction check, no API key/network; gitignored
 ├── tests/
@@ -815,7 +919,13 @@ For a manual, real-API smoke test with hardcoded defaults (the original way this
 uv run python run_smoke_test.py
 ```
 
-To compare several already-completed runs sitting in `results/`:
+To compare several already-completed runs sitting in `results/` (one dataset at a time — see "Cross-run comparison" above):
+
+```bash
+uv run python main.py compare --dataset climate
+```
+
+The standalone module invocation still works too, scanning everything unfiltered by default:
 
 ```bash
 uv run python -m ml_agent.compare_runs
@@ -851,16 +961,17 @@ Project 5 of a 10-step learning roadmap: Linux → Git → Professional Python �
 6. **As of 2026-07-17:** `agent.py`'s orchestration loop is wired end-to-end and verified via 3 live runs (`build_dispatch_table` → `DispatchResult` → `run_session` → `run_agent_loop`). The optimization-target injection is built and confirmed working against a live agent. **Not resolved this session:** the human-in-the-loop hook's timing (still deferred, undecided either way — not the same as "rejected"). **New, explicitly requested:** per-iteration logging inside `run_agent_loop`, to support deeper run-to-run analysis — planned for a future session.
 7. **As of 2026-07-19:** per-iteration logging is built, verified via a live run, and made human-readable (`format_log`) and persistable (`results/smoke_test_log.json`, at that point still overwritten per run — see item 8). The `TOOL_FUNCTIONS`-rename test safeguard from item 6 is also built, though its original rationale was found to be inaccurate on closer inspection (see "Development Notes" below) — kept as documentation, not as a fix for a real gap. **The human-in-the-loop hook's scope is now decided** (hyperparameter edge-case flagging, reasoning/action contradiction detection, stalled/repeated-proposal detection — deliberately not per-proposal approval, deliberately not convergence-only review), but its **build remains deferred** until the project is close to a finished, working state.
 8. **As of 2026-07-24:** run persistence corrected to one timestamped file per run instead of an overwritten single file, wall-clock timing added, fit-time warning capture built and verified in `trainer.py` (captures every warning category, not just the one already known about), and `ml_agent/compare_runs.py` built and verified against 6 real runs — the cross-run comparison goal from item 7 is now met. **Not resolved this session:** whether/how to actually address the underlying `ConvergenceWarning` itself — not yet even narrowed to a shortlist. **Also carried forward:** a `test_tools.py` review against `train_model`'s new `warnings` key, a minor, low-priority timestamp-format inconsistency between `run_smoke_test.py` (local time) and `compare_runs.py` (UTC), and the still-undecided choice between building `main.py` next or the human-friendly results viewer.
-9. **As of 2026-07-27 (current):** `test_tools.py` reviewed and resolved (no changes needed — see its section above); the `ConvergenceWarning` shortlist narrowed to a decision and built (`max_iter` exposed, verified against 3 live runs — see "Closing the `ConvergenceWarning` shortlist" above); `main.py` built as the real public CLI entry point, chosen over the results viewer as this session's priority specifically because `run_smoke_test.py` being gitignored meant no committed entry point existed at all; and `MAX_ITERATIONS` raised from 10 to 15, closing a 07-12 open decision once real live-run evidence met its stated condition.
+9. **As of 2026-07-27:** `test_tools.py` reviewed and resolved (no changes needed — see its section above); the `ConvergenceWarning` shortlist narrowed to a decision and built (`max_iter` exposed, verified against 3 live runs — see "Closing the `ConvergenceWarning` shortlist" above); `main.py` built as the real public CLI entry point, chosen over the results viewer as this session's priority specifically because `run_smoke_test.py` being gitignored meant no committed entry point existed at all; and `MAX_ITERATIONS` raised from 10 to 15, closing a 07-12 open decision once real live-run evidence met its stated condition.
+10. **As of 2026-07-29 (current):** the `max_iter`-vs-`C` confound (item 9's carried-forward follow-up) resolved via a real controlled run — `C`, not `max_iter`, confirmed as the driver of the recall improvement, and a metric-terminology correction made in the same write-up (see "Closing the `ConvergenceWarning` shortlist" above). Results-file naming renamed and dataset-scoped (`result_log_<timestamp>_<dataset_name>.json`, `compare_runs.py`'s `build_comparison` now filters by dataset), closing a 2026-07-27 open item, with a one-time migration script for pre-existing files. `main.py` gained a `compare` subcommand (dataset-required, sharing one entry point with `run`) and a free-tier rate-limit note, after reproducing a real `429 RESOURCE_EXHAUSTED` crash from running sessions back-to-back. A genuine reproducibility bug was found and fixed: `RandomForestClassifier` had no `random_state` at all, so identical hyperparameters could produce different results across separate runs — `random_state` is now threaded through every estimator, reusing the same seed already used for the train/test split (see "Reproducibility: seeding every estimator" above).
 
     **Carried forward, full running list, for the next session:**
-    - The human-friendly results viewer (item 4 from 2026-07-24; design agreed, not built).
-    - Timestamp-format inconsistency, `run_smoke_test.py` (local) vs. `compare_runs.py` (UTC) — low priority.
+    - The human-friendly results viewer (item 4 from 2026-07-24; design agreed, not built) — the next planned priority.
+    - Timestamp-format inconsistency, `run_smoke_test.py` (local) vs. `compare_runs.py` (UTC) — low priority, unfixed.
     - CSV/spreadsheet export — the explicitly named gate before making the repo public.
-    - Rename the `smoke_test_log_<timestamp>.json` convention to `result_log_<dataset_name>_<timestamp>.json` — needs `compare_runs.py`'s real scan logic checked first, in case it globs a fixed prefix rather than everything in `results/`.
-    - `Agent-decisions.md` generator — a post-hoc, human-readable report of `record_model_proposal`/`record_convergence_decision` reasoning per run, written incrementally (open-at-start, append-per-iteration) as partial mitigation for the invisible-failed-run limitation (item 8's known limitation, `compare_runs.py` section above). Architecture agreed: an injected callback into `run_agent_loop` (mirroring the still-deferred human-in-the-loop hook's shape), not yet built — to be designed together with that hook, since both need the same injection point in the same loop.
-    - A possible future "register a dataset from the terminal, no code edit" feature — raised, not scoped or committed to.
-    - A follow-up run isolating whether `C` or `max_iter` actually drove two of this session's three runs' improved precision (`DATA_SCIENCE_ANALYSIS.md` §11.5's confound) — a manual `Trainer.train_model`/`evaluate_model` call with `C=0.1` alone, `max_iter` left at default, documented as a ready-to-run snippet in the session's context handoff file.
+    - `Agent-decisions.md` generator — a post-hoc, human-readable report of `record_model_proposal`/`record_convergence_decision` reasoning per run, written incrementally (open-at-start, append-per-iteration) as partial mitigation for the invisible-failed-run limitation (real crash reproduced 2026-07-29, still an accepted limitation — see "Cross-run comparison" above). Architecture agreed: an injected callback into `run_agent_loop` (mirroring the still-deferred human-in-the-loop hook's shape), not yet built — to be designed together with that hook, since both need the same injection point in the same loop.
+    - **A "register/list datasets from the terminal" feature (expanded 2026-07-29, merging in a 2026-07-24 idea raised in the same spirit):** `dataset list` / `dataset upload` subcommands, mirroring `compare`'s pattern — `list` shows the current `DATASET_LOADERS` registry, `upload` lets a user register a new dataset without hand-editing `dataset.py`. Not scoped in detail; only worth building once a third dataset is realistically on the horizon.
+    - **A second, optional `--model-random-state` flag (new, 2026-07-29), low priority:** would default to match `--random-state`, restoring the ability to isolate split-variance from model-internal-variance as an opt-in advanced knob — considered and deliberately deferred in favor of the simpler single-seed design actually built this session (see "Reproducibility" above for the full trade-off).
+    - A further extension to the `C`-vs-`max_iter` isolation finding (new, 2026-07-29), low priority: sweeping `C` across several values with `max_iter` held constant, to characterize the shape of the relationship rather than just confirm its direction — nice-to-have for the portfolio angle, not blocking anything.
     - The human-in-the-loop hook itself, and the two original 07-13 `run_agent_loop` judgment calls (single-call-per-turn; convergence result not echoed on stop) — all still untouched, still deliberately deferred.
 
 ---
@@ -900,3 +1011,13 @@ Reusing `tools.py`'s `TOOL_FUNCTIONS` mapping for 3 of the dispatch table's 5 en
 Building `main.py` surfaced a distinction worth stating plainly, since it's easy to conflate: an unvalidated `optimization_target` string reaching Gemini's prompt unchecked is an **input-validation gap** (a typo or invented metric silently has no connection to what the tool results can support) — not **prompt injection** (which specifically means malicious instructions smuggled into content the model processes, hijacking it against its own instructions). The fix for the former (constrain to a known set) is a normal input-validation measure, not a security control against the latter; worth being precise about which problem a given safeguard actually addresses.
 
 Separately, this session closed an open decision (`MAX_ITERATIONS`, 10 → 15) using a criterion worth naming explicitly for future similar cases: a debugging-safety-net value should be revisited once its own stated condition is met by real evidence, not left in place indefinitely just because it was never causing visible errors. Here, the cap wasn't failing loudly — it was silently truncating legitimate in-progress agent reasoning, a quieter failure mode that only became visible by actually reading what a real run's tool-call sequence was doing when it got cut off. Full rationale in `TECHNICAL_NOTES.md` Part 5, §5.9.
+
+### Reproducibility, naming, and discoverability notes (2026-07-29 session)
+
+Two Breast Cancer runs looking identical, followed by a third with matching hyperparameters producing a *different* result, is the kind of anomaly that's easy to wave away as noise if it isn't actually chased down. It wasn't: checked directly against `trainer.py`'s real code rather than assumed, this turned out to be a genuine bug (`RandomForestClassifier` never received a `random_state`, see "Reproducibility: seeding every estimator" above) rather than a fluke — a reminder that an *apparent* pattern across a small number of runs (three matching results) can still be coincidence, and the anomaly that breaks the pattern is sometimes more informative than the pattern itself.
+
+A related terminology correction, worth stating plainly rather than quietly fixing: an earlier write-up of the `max_iter`-vs-`C` confound (2026-07-27) described the confounded runs as reaching "a better precision." Re-checking the actual numbers this session showed precision never moved at all across any of the relevant runs — the metric that changed was recall. The distinction matters beyond wording: `max_iter` and `C` do fundamentally different things (solver iteration cap vs. regularization strength), and getting the metric right is part of getting the causal claim right, not a cosmetic detail.
+
+The results-file naming change (`smoke_test_log_<timestamp>.json` → `result_log_<timestamp>_<dataset_name>.json`) surfaced a design fork worth documenting: placing `dataset_name` *before* the timestamp (`result_log_<dataset_name>_<timestamp>.json`) was the initially-proposed convention, but would have broken `compare_runs.py`'s existing assumption that a whole-filename string sort produces chronological order — all of one dataset's runs would sort before all of another's, regardless of when they actually ran. Checking a downstream consumer's assumptions before finalizing an upstream naming change caught this before it shipped, rather than after.
+
+Also worth recording: a subcommand design (`main.py compare`, alongside the existing default `run` behavior) was chosen over requiring an explicit `run` subcommand for the existing default path, specifically because there were no existing users of the CLI besides this project's own author at the time of the change — retraining muscle memory for a convention with zero present benefit was judged the wrong trade-off for a not-yet-public project, though worth revisiting if the project goes public later and a stranger's first interaction is `--help`.
