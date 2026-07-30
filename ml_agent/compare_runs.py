@@ -1,14 +1,19 @@
-# ml_agent/compare_runs.py — turns several results/smoke_test_log_*.json
+# ml_agent/compare_runs.py — turns several results/result_log_*.json
 # files into one comparison file, so multiple agent runs can be looked
 # at side by side instead of one file at a time.
 #
-# NEW this session (2026-07-24), part of item 2 on the running TODO
-# list -- the ORIGINAL motivating question ("why did one run converge
-# faster with no ConvergenceWarning than another") needed multiple
-# runs' logs persisted and compared side by side, which wasn't possible
-# before this session's timestamped-filename change to
-# run_smoke_test.py (previously results/smoke_test_log.json was
-# overwritten every run, so only ever one run's data existed at a time).
+# Added 2026-07-24, part of item 2 on the running TODO list -- the
+# ORIGINAL motivating question ("why did one run converge faster with
+# no ConvergenceWarning than another") needed multiple runs' logs
+# persisted and compared side by side, which wasn't possible before
+# that session's timestamped-filename change to run_smoke_test.py
+# (previously results/smoke_test_log.json was overwritten every run,
+# so only ever one run's data existed at a time).
+#
+# Filename prefix updated 2026-07-29: smoke_test_log_<timestamp>.json
+# -> result_log_<timestamp>_<dataset_name>.json (confirmed with
+# Melanie). glob pattern below updated to match. See rename_results.py
+# for the one-time migration of pre-existing files in results/.
 
 from __future__ import annotations
 
@@ -20,8 +25,8 @@ from typing import Any
 
 def summarize_run(run_data: dict[str, Any], source_file: str | None = None) -> dict[str, Any]:
     """Turns one already-loaded run dict (the full contents of one
-    results/smoke_test_log_*.json file) into one flat, comparable
-    summary row.
+    results/result_log_*.json file) into one flat, comparable summary
+    row.
 
     Pure function -- no file I/O, no live API call -- same "isolate the
     checkable part" instinct as validate_split (agent.py) and
@@ -29,14 +34,16 @@ def summarize_run(run_data: dict[str, Any], source_file: str | None = None) -> d
     dict, no real run needed.
 
     DEFENSIVE ON PURPOSE: this project's results/ folder now contains a
-    genuine mix of file vintages -- runs from before this session don't
-    have an "elapsed_seconds" key at the top level at all, and their
-    train_model log entries don't have a "warnings" key in their result
-    dict at all (that field didn't exist before this session's
-    trainer.py change). Every access below uses .get(...) with an
-    explicit default rather than direct indexing, specifically so this
-    function doesn't crash on an older file -- it should degrade to
-    None/empty rather than raise.
+    genuine mix of file vintages -- runs from before the 2026-07-24
+    session don't have an "elapsed_seconds" key at the top level at
+    all, and their train_model log entries don't have a "warnings" key
+    in their result dict at all (that field didn't exist before that
+    session's trainer.py change). Every access below uses .get(...)
+    with an explicit default rather than direct indexing, specifically
+    so this function doesn't crash on an older file -- it should
+    degrade to None/empty rather than raise. This is unrelated to, and
+    unaffected by, the 2026-07-29 filename-prefix rename -- it's about
+    what's inside the file, not what the file is called.
 
     Returns a dict with these keys, always present (None or [] when the
     source run doesn't have the underlying data):
@@ -119,18 +126,46 @@ def summarize_run(run_data: dict[str, Any], source_file: str | None = None) -> d
     }
 
 
-def build_comparison(results_dir: Path = Path("results")) -> list[dict[str, Any]]:
-    """Scans results_dir for every smoke_test_log_*.json file, loads
-    each one, and returns one summarize_run() row per file.
+def build_comparison(
+    results_dir: Path = Path("results"),
+    dataset_name: str | None = None,
+) -> list[dict[str, Any]]:
+    """Scans results_dir for result_log_*.json files and returns one
+    summarize_run() row per file.
+
+    dataset_name, when given, restricts the scan to
+    result_log_*_<dataset_name>.json only -- confirmed with Melanie
+    2026-07-29: comparing runs across different datasets is never
+    allowed, since their metrics (accuracy/precision/recall/f1) aren't
+    comparable against different data. main.py's `compare` subcommand
+    always passes an explicit, validated dataset_name and never calls
+    this with None.
+
+    dataset_name=None (scan everything regardless of dataset) is kept
+    only for this module's own standalone `python -m
+    ml_agent.compare_runs` entry point, preserving its original
+    behavior -- flagged for Melanie to confirm whether that standalone
+    entry point should also be restricted to one dataset at a time, now
+    that main.py's `compare` subcommand is the primary, documented way
+    to do this.
 
     Not capped at any particular number of runs -- picks up however
     many matching files currently exist in results_dir, whether that's
-    2 or 20. Sorted by filename, which sorts chronologically as-is
-    given the YYYY_MM_DD_HHMMSS naming convention -- no separate date
-    parsing needed.
+    2 or 20. Sorted by filename, which still sorts chronologically
+    as-is, since the naming convention is
+    result_log_<YYYY_MM_DD_HHMMSS>_<dataset_name>.json -- the timestamp
+    segment immediately follows the fixed prefix, so a whole-filename
+    string sort compares timestamps first and only falls back to
+    dataset_name as a tiebreaker on the (currently impossible, given
+    HHMMSS granularity) case of two runs sharing the exact same second.
+    This was deliberately checked when the naming convention changed
+    2026-07-29 -- putting dataset_name BEFORE the timestamp instead
+    would have broken this sort (all of one dataset's runs would sort
+    before all of another's, regardless of when they actually ran).
     """
+    pattern = f"result_log_*_{dataset_name}.json" if dataset_name else "result_log_*.json"
     rows = []
-    for path in sorted(results_dir.glob("smoke_test_log_*.json")):
+    for path in sorted(results_dir.glob(pattern)):
         run_data = json.loads(path.read_text())
         rows.append(summarize_run(run_data, source_file=path.name))
     return rows
