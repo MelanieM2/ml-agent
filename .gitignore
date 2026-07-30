@@ -7,3 +7,5 @@ __pycache__/
 results/
 smoke_test.py
 run_smoke_test.py
+rename_results.py
+git_add_commit_push.sh
