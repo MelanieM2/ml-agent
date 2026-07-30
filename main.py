@@ -14,8 +14,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -23,6 +24,7 @@ from dotenv import load_dotenv
 load_dotenv()  # must run before genai.Client() is constructed inside run_session
 
 from ml_agent.agent import run_session
+from ml_agent.compare_runs import build_comparison
 from ml_agent.dataset import DATASET_LOADERS
 from ml_agent.gemini_client import DEFAULT_MODEL, MAX_ITERATIONS, format_log
 
@@ -69,17 +71,25 @@ def _prompt_for_target() -> str:
     return choice
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """CLI flags for everything run_session accepts. --dataset/--target
     fall back to an interactive prompt when omitted (the two genuine
     judgment calls); everything else silently uses run_session's own
     defaults when omitted, with no prompt -- these are secondary/
-    advanced knobs that shouldn't interrupt a normal run."""
+    advanced knobs that shouldn't interrupt a normal run.
+
+    Accepts an explicit argv so main() can hand this a pre-sliced list
+    (e.g. with a leading "run" token already stripped) rather than
+    always reading sys.argv directly -- see main()'s subcommand
+    handling below."""
     parser = argparse.ArgumentParser(
         description=(
             "Run one full ml-agent session: Gemini proposes, trains, and "
             "evaluates scikit-learn models against a chosen dataset, using "
-            "the given optimization target."
+            "the given optimization target. "
+            "(Also see the separate 'compare' subcommand: "
+            "`python main.py compare` -- compares all persisted past runs "
+            "instead of starting a new one.)"
         )
     )
     parser.add_argument(
@@ -128,11 +138,108 @@ def parse_args() -> argparse.Namespace:
             "showing only the final result."
         ),
     )
-    return parser.parse_args()
+    return parser.parse_args(argv)
+
+
+def _run_compare(argv: list[str]) -> None:
+    """Handles `python main.py compare [--dataset NAME] [--results-dir DIR]`.
+
+    Thin wrapper directly reusing compare_runs.build_comparison() --
+    no new comparison logic lives here, same "no new orchestration
+    logic in main.py" principle as the run path above.
+
+    --dataset is REQUIRED, not just recommended -- confirmed with
+    Melanie 2026-07-29: comparing runs across different datasets would
+    combine incomparable metrics into one file, so this is never
+    allowed, not even as an opt-in "compare everything" mode. If
+    omitted, or given but not a real dataset (typo), this prints a
+    warning explaining why and falls back to the SAME interactive
+    picker _prompt_for_dataset() already uses for the `run` path above
+    -- one piece of picker logic, not two -- rather than argparse's
+    own choices= mechanism, which would just print a bare usage error
+    and exit instead of explaining itself and re-prompting.
+
+    Writes results/comparison_<timestamp>_<dataset>.json -- the
+    dataset name in the filename itself is what actually solves the
+    original problem Melanie flagged (comparison_<timestamp>.json gave
+    no indication of which dataset a comparison covered)."""
+    parser = argparse.ArgumentParser(
+        prog="main.py compare",
+        description=(
+            "Compare all persisted results/result_log_*.json runs for ONE "
+            "dataset into one results/comparison_<timestamp>_<dataset>.json "
+            "summary file. --dataset is required -- comparing runs across "
+            "different datasets would mix metrics that aren't comparable "
+            "against different data, so this is never allowed. If omitted "
+            "or misspelled, you'll be prompted to choose interactively."
+        ),
+    )
+    parser.add_argument(
+        "--dataset",
+        default=None,
+        help=(
+            "Dataset to compare runs for. Required -- if omitted or not a "
+            f"real dataset name ({', '.join(DATASET_LOADERS.keys())}), "
+            "you'll be prompted to choose one interactively."
+        ),
+    )
+    parser.add_argument(
+        "--results-dir",
+        type=Path,
+        default=Path("results"),
+        help=(
+            "Directory to scan for result_log_*.json files. Only needed if "
+            "your runs live somewhere other than the default results/ folder."
+        ),
+    )
+    args = parser.parse_args(argv)
+
+    dataset_name = args.dataset
+    if dataset_name is None:
+        print(
+            "A dataset name is required to compare runs -- mixing datasets "
+            "would combine metrics that aren't comparable against different data."
+        )
+        dataset_name = _prompt_for_dataset()
+    elif dataset_name not in DATASET_LOADERS:
+        print(f"Unrecognized dataset {dataset_name!r}.")
+        dataset_name = _prompt_for_dataset()
+
+    rows = build_comparison(args.results_dir, dataset_name=dataset_name)
+
+    if not rows:
+        print(f"No result_log_*_{dataset_name}.json files found in {args.results_dir}/ yet -- nothing to compare.")
+        return
+
+    timestamp = datetime.now(timezone.utc).strftime("%Y_%m_%d_%H%M%S")
+    out_path = args.results_dir / f"comparison_{timestamp}_{dataset_name}.json"
+    out_path.write_text(json.dumps(rows, indent=2))
+    print(f"Compared {len(rows)} run(s) for dataset={dataset_name!r} -> {out_path}")
 
 
 def main() -> None:
-    args = parse_args()
+    # Subcommand sniffing, done BEFORE argparse sees anything -- this is
+    # what makes "compare" a sibling of the default run path without
+    # requiring every existing invocation to be retyped with a leading
+    # "run" (confirmed with Melanie 2026-07-29, chosen specifically so
+    # `python main.py --dataset X` keeps working exactly as it does
+    # today, unchanged):
+    #   python main.py compare ...   -> handled entirely by _run_compare,
+    #                                    returns immediately, never
+    #                                    touches run_session at all.
+    #   python main.py run ...       -> "run" token stripped, everything
+    #                                    else below proceeds exactly as
+    #                                    if "run" had never been typed.
+    #   python main.py ...           -> (no subcommand) proceeds exactly
+    #                                    as it always has.
+    raw_argv = sys.argv[1:]
+    if raw_argv and raw_argv[0] == "compare":
+        _run_compare(raw_argv[1:])
+        return
+    if raw_argv and raw_argv[0] == "run":
+        raw_argv = raw_argv[1:]
+
+    args = parse_args(raw_argv)
 
     # Printed unconditionally, at the very start of every run -- not
     # just when --dataset is omitted -- so it's visible to a contributor
@@ -143,6 +250,10 @@ def main() -> None:
         "(Want to add a new dataset? Binary classification only for now "
         "-- see TECHNICAL_NOTES.md, Part 5, §5.8 'Adding a new dataset' "
         "for the 3-step process.)\n"
+        "(Note: the free tier for the Gemini API is rate-limited per "
+        "minute. If you run this back-to-back several times quickly, "
+        "you may hit a 429 RESOURCE_EXHAUSTED error -- just wait "
+        "under a minute and try again.)\n"
     )
 
     dataset_name = args.dataset or _prompt_for_dataset()
@@ -195,14 +306,23 @@ def main() -> None:
 
     # Persisted unconditionally, unlike run_smoke_test.py (which only
     # writes when LOG_ITERATIONS=True) -- a --no-log-iterations run's
-    # final result is still worth keeping. Same smoke_test_log_<ts>.json
-    # naming convention as run_smoke_test.py, deliberately, so both entry
-    # points feed the same results/ directory compare_runs.py already
-    # scans -- flagged for Melanie's confirmation once compare_runs.py's
-    # real current content is checked, in case its scan logic is more
-    # specific than "everything in results/".
+    # final result is still worth keeping.
+    #
+    # Naming convention CHANGED 2026-07-29 (confirmed with Melanie):
+    # smoke_test_log_<timestamp>.json -> result_log_<timestamp>_<dataset_name>.json
+    #   - dataset_name deliberately comes AFTER the timestamp, not before,
+    #     specifically so sorting by filename still sorts chronologically
+    #     across every dataset (compare_runs.py's build_comparison()
+    #     relies on exactly this) -- putting dataset_name first would have
+    #     grouped all "breast_cancer" runs before all "climate" runs
+    #     alphabetically, silently breaking that assumption.
+    #   - compare_runs.py updated in the same session to glob
+    #     "result_log_*.json" instead of the old "smoke_test_log_*.json"
+    #     prefix -- see that file for the corresponding change.
+    #   - existing files in results/ predating this change need a
+    #     one-time migration; see rename_results.py.
     timestamp = datetime.now().strftime("%Y_%m_%d_%H%M%S")
-    log_path = Path(f"results/smoke_test_log_{timestamp}.json")
+    log_path = Path(f"results/result_log_{timestamp}_{dataset_name}.json")
     log_path.parent.mkdir(exist_ok=True, parents=True)
 
     persisted = {**result, "elapsed_seconds": elapsed_seconds, "config": config}
