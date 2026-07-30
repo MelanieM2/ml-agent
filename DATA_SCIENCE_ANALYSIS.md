@@ -16,6 +16,8 @@ _Updated 2026-07-24 — see §10: cross-run comparison goes live — the §8.4/�
 
 _Updated 2026-07-27 — see §11: `max_iter` exposed as a tunable hyperparameter — the ConvergenceWarning shortlist decision, tested against 3 live runs_
 
+_Updated 2026-07-29 — see §12: the `max_iter`-vs-`C` confound isolated and resolved, §11.7's flagged Random Forest anomaly explained (a real reproducibility bug, not a curiosity), and new Breast Cancer results across all three model types_
+
 ---
 
 ## 1. The dataset asymmetry this analysis depends on
@@ -606,6 +608,65 @@ this session.
 | Is `C`, not `max_iter`, the more likely driver of Runs B/C's improved precision? | Plausible inference from comparing 3 runs, not proven — a targeted single-variable follow-up run would confirm or rule this out. |
 | Does this fix outperform the project's prior typical converged outcome? | On this small sample, yes — recall 1.0 / precision 0.25 (Runs B, C) versus the prior typical 1.0 / 0.18 (§10.1). |
 | Is "the data reaches Gemini" the same claim as "Gemini reasons well about it"? | No — flagged explicitly before these runs, and worth restating: this session's 3/3 success rate is encouraging but not a guarantee of future behavior on every run. |
+
+---
+
+<!--
+DATA_SCIENCE_ANALYSIS.md update — 2026-07-29 session
+-->
+
+## 12. Update, 2026-07-29: the `max_iter`-vs-`C` confound resolved, §11.7's anomaly explained, and new Breast Cancer results
+
+§11.5 left one thing explicitly unresolved and flagged as a natural next step: whether `C` or `max_iter` actually drove Runs B/C's improved precision. §11.7 separately flagged an odd, unexplained observation about Random Forest producing bit-identical results across runs despite `random_state` never being set. This session's real runs resolved both — and neither resolution was what the original write-up assumed.
+
+### 12.1 Correction: the metric that actually moved was recall, not precision
+
+Before presenting the isolation run, a correction to §11.5 and §11.6's own wording is necessary rather than quietly folded in: both sections describe Runs B/C as reaching "a better precision" (0.25) than Run A. Re-checking the actual numbers this session: **precision was 0.25 in Run A, Runs B/C, and every run discussed below — it never moved at all.** The metric that changed between Run A (`max_iter` alone) and Runs B/C (`max_iter` + `C` together) was **recall**: 0.778 vs. 1.0. This is a correction to how the finding was described, not to the finding itself — the underlying confound (which change actually drove the improvement) is unaffected, but "precision" was simply the wrong word throughout §11.5–§11.6, and is corrected here rather than left standing (see `README.md`'s "Closing the ConvergenceWarning shortlist" section for the same correction, stated more briefly).
+
+### 12.2 The isolation run
+
+A controlled single-variable follow-up, run this session: `C=0.1` alone, `max_iter` deliberately left at its untouched default (100) — the exact snippet flagged as a natural next step in §11.5.
+
+| | Warning fires? | Recall | Precision |
+|---|---|---|---|
+| Run A (`max_iter` alone, isolated) | No | 0.778 | 0.25 |
+| Runs B/C (`max_iter` + `C` together) | No | 1.0 | 0.25 |
+| **Isolation run (`C` alone, this session)** | **Yes** | **1.0** | **0.25** |
+
+The isolation run's `ConvergenceWarning` still fires — expected, since `max_iter` was deliberately untouched — yet recall still reaches 1.0, matching Runs B/C exactly. **This confirms `C`, not `max_iter`, as the driver of the recall improvement, and confirms it independently of convergence status.** `max_iter` governs only whether `lbfgs` reports having satisfied its own internal stopping criterion; it has no direct bearing on what the fitted model actually predicts. `C` (inverse regularization strength) is what reshapes the decision boundary — and the isolation run demonstrates the two are fully decoupled: a model can be "unconverged" by sklearn's own bookkeeping while making identical predictions to one that reports converging cleanly.
+
+This upgrades §11.5's "plausible inference, not proven" to a documented, causally-isolated fact — the exact kind of controlled, single-variable-changed follow-up this project's stated portfolio priority values most (see `README.md`'s Working Preferences reference to causal-isolation analysis).
+
+### 12.3 §11.7's anomaly, resolved: not a curiosity, a real reproducibility bug
+
+§11.7 flagged, without explanation, that two Random Forest calls with *different* `n_estimators` values produced bit-identical metrics and confusion matrices, "despite `RandomForestClassifier`'s `random_state` never being set anywhere in this project's schema — meaning sklearn's own internal randomness should, in principle, differ run to run." This session's Breast Cancer runs surfaced the fuller picture: **three** separate Random Forest calls, each with genuinely different hyperparameters, produced identical results — then a **fourth** call, using hyperparameters matching one of the first three exactly, produced a *different* result.
+
+Checked directly against `trainer.py`'s real code (not inferred): every estimator was instantiated as `estimator_class(**hyperparameters)`, with `random_state` never passed at all — meaning `RandomForestClassifier` always ran under sklearn's own default, `random_state=None`, drawing from numpy's global RNG, freshly (and differently) seeded in every separate process. §11.7's "bit-identical" observation was not evidence of hidden determinism; it was coincidence — this specific dataset is small and strongly separable enough that these particular hyperparameter changes (`n_estimators`, `max_depth`) often didn't move the result, until one run's random draw happened to land differently. `LogisticRegression`'s consistent reproducibility across every run in this document, by contrast, was never actually about seeding either — `lbfgs` is a deterministic optimizer on a fixed convex objective given a fixed split, with no bootstrap sampling to vary.
+
+**Fixed this session:** `random_state` is now threaded into every estimator's constructor, reusing the same value already used for the train/test split (see `README.md`'s "Reproducibility: seeding every estimator" and `TECHNICAL_NOTES.md` Part 6 for the implementation). Verified directly: two post-fix Breast Cancer runs, same seed, different Random Forest hyperparameter combinations, now produce identical results to each other — the specific behavior the fix targets.
+
+**Worth being precise about what this changes methodologically:** every Random Forest result reported earlier in this document (§2, §8–§11) was generated *before* this fix, under sklearn's unseeded default. Those figures remain accurate records of what those specific runs produced, but should not be read as necessarily reproducible if re-run today — a real, if narrow, caveat on this document's own earlier Random Forest figures.
+
+### 12.4 New results: Breast Cancer across all three model types, post-fix
+
+Three further Breast Cancer runs this session (`optimization_target="recall"`, `random_state=42` throughout) explored Logistic Regression, Random Forest, and — for the first time in this project's live-run history — an SVM with a `linear` kernel:
+
+| Run | Model sequence | Best recall reached | Notes |
+|---|---|---|---|
+| 1 | RF (`class_weight="balanced"`) → SVM (`kernel="linear"`, `C=1`, `class_weight="balanced"`) | **0.9861** | Highest recall observed on Breast Cancer to date, beating every prior Logistic-Regression-based result on this dataset |
+| 2 | LogReg (baseline, warning fires) → LogReg (`max_iter=500`) → RF (`n_estimators=200`, `max_depth=10`) | 0.9722 | Consistent with every earlier Logistic-Regression `max_iter=500` result on this dataset (§ Breast Cancer results throughout this document) |
+
+The linear-kernel SVM result (Run 1) is a genuinely new data point for this project — no prior live run had proposed `kernel="linear"` specifically; every earlier SVM run used the default `rbf`. The agent's own reasoning explicitly connected the choice to the dataset's shape (*"the dataset is relatively high-dimensional (30 features) compared to the sample size, where linear models often excel"*) — a plausible, dataset-aware justification, though n=1 for this specific kernel choice, not yet a pattern.
+
+### 12.5 Updated summary table
+
+| Question | Answer, with appropriate caveats |
+|---|---|
+| Is `C`, not `max_iter`, confirmed as the driver of the recall improvement flagged in §11.5? | Yes — a controlled isolation run (`C` alone, `max_iter` untouched) reached the same recall as the confounded runs, while the warning still fired. Documented fact from a real controlled run, not inference. |
+| Was §11.5/§11.6's "precision" framing accurate? | No — corrected here: precision was 0.25 throughout and never moved; recall was the metric that changed. |
+| Is §11.7's Random Forest "bit-identical results" observation evidence of hidden determinism? | No — resolved as a real reproducibility bug (`random_state` never set), confirmed directly against `trainer.py`'s code and fixed this session. |
+| Are pre-2026-07-29 Random Forest figures in this document still reliable as records of what happened? | Yes, as historical records of those specific runs. Not necessarily reproducible if re-run today under the old code — a narrow methodological caveat, not a retraction. |
+| Has a new best recall been reached on Breast Cancer? | Yes, on this small sample — 0.9861 (linear-kernel SVM), the first live use of that kernel on this dataset. n=1, not yet a confirmed pattern. |
 
 ---
 

@@ -990,3 +990,131 @@ comfortably covers every run observed so far, with some margin, while
 staying well clear of Part 1's cost-scaling concern range. Worth
 revisiting if a future run legitimately needs more than 15 for a
 complete cycle.
+
+---
+
+## Part 6: Results-file renaming, `compare` subcommand, and the reproducibility fix (2026-07-29)
+
+_Status: IMPLEMENTED and verified — renamed files/dataset filtering confirmed against 12 Climate Crashes and 4 Breast Cancer runs; the reproducibility fix confirmed against 2 post-fix Breast Cancer runs. Live-run data-science findings from this session (the `max_iter`-vs-`C` isolation, the Random Forest anomaly's root cause) are in `DATA_SCIENCE_ANALYSIS.md` §12, not duplicated here — this Part covers implementation only._
+
+### 6.1 Results-file renaming: `smoke_test_log_<timestamp>.json` → `result_log_<timestamp>_<dataset_name>.json`
+
+Once Breast Cancer came into regular use alongside Climate Crashes, the original filename convention had no way to indicate which dataset a given run belonged to — and `compare_runs.py`'s `build_comparison` had no way to avoid silently mixing both datasets' runs into one comparison file, combining metrics computed against genuinely different data.
+
+**A design fork surfaced and resolved before implementation, not after:** the initially-proposed convention placed `dataset_name` *before* the timestamp (`result_log_<dataset_name>_<timestamp>.json`). Checked against `compare_runs.py`'s own existing docstring claim — that a whole-filename string sort produces chronological order, since the timestamp segment (`YYYY_MM_DD_HHMMSS`) sorts correctly as a plain string — this would have broken that assumption: all of one dataset's runs would sort before all of another's, regardless of actual run time. **Resolved:** `dataset_name` placed *after* the timestamp instead (`result_log_<timestamp>_<dataset_name>.json`), preserving `compare_runs.py`'s existing sort-by-filename behavior with zero changes needed to that logic.
+
+```
+result_log_2026_07_29_231134_breast_cancer.json
+            └──────┬──────┘ └──────┬──────┘
+             timestamp        dataset_name
+             (sorts correctly    (tiebreaker only,
+              as a plain string)  never affects order
+                                   at HHMMSS granularity)
+```
+
+### 6.2 Migration: `rename_results.py`
+
+A one-time script, deliberately **not** part of the `ml_agent` package — a throwaway migration helper, not project code, gitignored, safe to delete once run. Renames every `results/smoke_test_log_*.json` file to the new convention.
+
+**One judgment call built into it, flagged rather than silently resolved:** files written by the old `run_smoke_test.py` never stored a `config.dataset` field at all (that field was introduced later, by `main.py`). Since `run_smoke_test.py` hardcodes the `climate` dataset, the script falls back to `"climate"` for any file missing that field — but this is an *inference*, not something read from the file itself, and every such case is printed with an explicit `(INFERRED ...)` tag so it can be checked by hand before trusting it. Files written by the new `main.py` already carry `config.dataset` and never need the fallback.
+
+Supports `--dry-run` (prints the planned renames without touching anything) and `--results-dir` (defaults to `results/`). Verified against a real migration: all pre-existing files renamed correctly, confirmed via `git status` showing no unexpected changes and `compare_runs.py` correctly picking up the renamed files afterward.
+
+### 6.3 `compare_runs.py`: `build_comparison` gains a `dataset_name` filter
+
+```python
+def build_comparison(
+    results_dir: Path = Path("results"),
+    dataset_name: str | None = None,
+) -> list[dict[str, Any]]:
+    pattern = f"result_log_*_{dataset_name}.json" if dataset_name else "result_log_*.json"
+    ...
+```
+
+`dataset_name=None` (scan everything, any dataset) is kept only for this module's own standalone `python -m ml_agent.compare_runs` entry point, preserving its original unrestricted behavior. **Flagged, not yet resolved:** whether that standalone entry point should also be restricted to one dataset at a time now that `main.py compare` (§6.4) is the primary, gated way to do this — left as an open question for Melanie rather than decided unilaterally.
+
+### 6.4 `main.py`: the `compare` subcommand
+
+Two design decisions here, each made explicitly rather than defaulted into.
+
+**Subcommand sniffing, not argparse subparsers with a required first token.** The first CLI token is inspected before argparse ever runs:
+
+```python
+raw_argv = sys.argv[1:]
+if raw_argv and raw_argv[0] == "compare":
+    _run_compare(raw_argv[1:])
+    return
+if raw_argv and raw_argv[0] == "run":
+    raw_argv = raw_argv[1:]
+args = parse_args(raw_argv)
+```
+
+This means `python main.py --dataset X` (no subcommand at all) continues to work exactly as it did before this session, `python main.py run --dataset X` is an equivalent explicit form, and `python main.py compare --dataset X` is new. The more conventional argparse pattern — requiring an explicit subcommand always (`git`-style) — was considered and rejected **for now**: with the project not yet public and no users besides its own author, retraining muscle memory for zero present benefit was judged the wrong trade-off. Flagged explicitly as revisitable if the project goes public and a stranger's first interaction is `--help`.
+
+**`--dataset` is required for `compare`, with a custom re-prompt rather than argparse's own `choices=` mechanism.** `choices=[...]` would have argparse itself print a bare usage error and exit on an invalid value, before any custom messaging could run. Instead, `--dataset` is accepted as an unconstrained string, then validated manually:
+
+```python
+dataset_name = args.dataset
+if dataset_name is None:
+    print("A dataset name is required to compare runs -- mixing datasets "
+          "would combine metrics that aren't comparable against different data.")
+    dataset_name = _prompt_for_dataset()
+elif dataset_name not in DATASET_LOADERS:
+    print(f"Unrecognized dataset {dataset_name!r}.")
+    dataset_name = _prompt_for_dataset()
+```
+
+`_prompt_for_dataset()` is the same function `run` already uses — no duplicate picker logic. Output is always named `comparison_<timestamp>_<dataset>.json`; a zero-result comparison (no matching files yet) prints a friendly message instead of writing an empty file.
+
+### 6.5 `main.py`: free-tier rate-limit note
+
+Running sessions back-to-back can exceed the Gemini API's free-tier per-minute quota — reproduced directly this session (a real `429 RESOURCE_EXHAUSTED` error, `generativelanguage.googleapis.com/generate_content_free_tier_requests`, limit 15/minute). Since this crash happens inside `run_agent_loop`, before `main.py` ever reaches its file-write step, the failed attempt writes no file at all — the same known limitation as `DATA_SCIENCE_ANALYSIS.md` §10.5, now reproduced again with a second dataset. Not fixed (see §6.7 below for why); `main.py` now prints a note about this at startup, alongside the existing "want to add a new dataset?" pointer, so a user hitting it knows to simply wait and retry rather than suspect a real bug.
+
+### 6.6 Reproducibility fix: `random_state` threaded into every estimator
+
+**Root cause** (see `DATA_SCIENCE_ANALYSIS.md` §12.3 for the live-run anomaly that surfaced this): `trainer.py`'s `Trainer.train_model` instantiated every estimator as `estimator_class(**hyperparameters)`, where `hyperparameters` only ever contains whatever `tools.py`'s schema exposes as Gemini-tunable — and no model's schema entry includes `random_state`. `RandomForestClassifier` therefore always ran under sklearn's own default (`random_state=None`), pulling from numpy's global RNG, freshly seeded per process.
+
+**Fix, `trainer.py`:**
+
+```python
+def train_model(
+    self, model_type, hyperparameters, *,
+    X_train, y_train,
+    random_state: int = 42,   # NEW
+) -> dict[str, Any]:
+    ...
+    estimator = estimator_class(**hyperparameters, random_state=random_state)
+```
+
+Deliberately **not** added to `tools.py`'s schema — this is a reproducibility knob, not a modeling choice Gemini should make; the same fact-vs-judgment separation already applied elsewhere in this project (`pos_label`, `optimization_target`). Safe to unpack alongside `**hyperparameters` unconditionally: since the schema never defines `random_state` as tunable, `validate_hyperparameters` would already reject any attempt by Gemini to supply one, so no collision is possible.
+
+**Fix, `agent.py`:** `build_dispatch_table` already received `random_state` and already used it for `train_test_split` — it simply never forwarded that same value into `Trainer.train_model`. One line added to the existing `functools.partial` binding:
+
+```python
+bound_train = partial(
+    trainer.train_model,
+    X_train=X_train, y_train=y_train,
+    random_state=random_state,   # NEW — same value already used for the split
+)
+```
+
+The full chain, end to end: `main.py --random-state N` → `run_session(random_state=N)` → `build_dispatch_table(random_state=N)` → both `train_test_split` (existing) and `Trainer.train_model` (new) receive the same `N`.
+
+### 6.7 A deliberate, discussed trade-off: one shared seed, not two
+
+A genuinely separate design was considered: a second, independent `--model-random-state` flag (defaulting to match `--random-state`, so a typical user sees no change), preserving the ability to vary the split and the models' internal randomness independently — useful if ever formally studying split-variance separately from model-variance. **Decided against, for now:** the single-shared-seed design is simpler (one flag, one mental model, full reproducibility from one number), and this project's actual goal — a working data-science agent, not a formal variance study — doesn't currently need that isolation. Logged as a low-priority future item (see `README.md` Roadmap context) rather than built speculatively.
+
+### 6.8 Verified against real data
+
+Two Breast Cancer runs, same `--random-state 42` (the default), different Random Forest hyperparameter combinations across the two runs: both produced identical recall (0.9444) and confusion matrix (`[[40,2],[4,68]]`) — the specific reproducibility this fix targets. Confusion matrix differs from any pre-fix run, as expected (a genuinely different seed than sklearn's old unseeded default), while now agreeing with itself run to run.
+
+### 6.9 Git commit ordering, this session
+
+Five commits, ordered so each leaves the repo in a working state (foundation-before-consumer, matching this project's existing convention):
+
+1. `.gitignore` (trivial, unblocking — added `rename_results.py` and the git-automation script used this session)
+2. `compare_runs.py`'s `dataset_name` filter (the capability `main.py`'s `compare` subcommand depends on)
+3. `main.py` (naming convention, `compare` subcommand, rate-limit note — the consumer of #2)
+4. `trainer.py` + `agent.py` together, as one commit (the reproducibility fix — neither half does anything alone; splitting them would leave an intermediate commit where the feature is only half-wired)
+
+Deliberately grouped at file level with multi-bullet commit messages, rather than fully atomic per-change commits via `git add -p` — several distinct changes landed in overlapping regions of the same functions this session (e.g. `main.py`'s `main()`), making hunk-level splitting more fiddly than it was worth for a solo-author, not-yet-public project at this stage.
