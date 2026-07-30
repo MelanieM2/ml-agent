@@ -49,12 +49,32 @@ class Trainer:
         *,
         X_train: pd.DataFrame,
         y_train: pd.Series,
+        random_state: int = 42,
     ) -> dict[str, Any]:
         """Fits model_type with hyperparameters, stores it, returns a ref.
 
         X_train/y_train are keyword-only, bound in via functools.partial
         in build_dispatch_table (agent.py) — Gemini only ever supplies
         model_type and hyperparameters.
+
+        random_state — NEW, 2026-07-29, keyword-only, bound in the same
+        way (functools.partial in build_dispatch_table), mirroring the
+        --random-state CLI flag already used for the train/test split
+        (main.py) — confirmed with Melanie: reuse the SAME seed value
+        for both, rather than introducing a second, separate flag.
+        Passed directly into every estimator's constructor below —
+        LogisticRegression, RandomForestClassifier, and SVC all accept
+        this kwarg. Deliberately NOT exposed as a Gemini-tunable
+        hyperparameter in tools.py's schema: it's a reproducibility
+        knob, not a modeling choice the agent should be making run to
+        run. This closes a real finding from this session:
+        RandomForestClassifier was previously instantiated with no
+        random_state at all (sklearn default None, pulling from
+        numpy's global RNG), so two runs with IDENTICAL hyperparameters
+        could — and did — produce different confusion matrices.
+        LogisticRegression's lbfgs solver looked reproducible before
+        this change only because it's a deterministic optimizer on a
+        fixed convex objective, not because it was ever actually seeded.
 
         Returns {"model_ref": ..., "warnings": [...]} — Gemini is never
         shown the fitted object itself, only an id it can pass back into
@@ -89,8 +109,14 @@ class Trainer:
         # Instantiate with Gemini's chosen hyperparameters unpacked as
         # keyword arguments (e.g. LogisticRegression(C=1.0, class_weight=None))
         # -- valid because validate_hyperparameters already confirmed every
-        # key/value pair is legitimate for this model_type.
-        estimator = estimator_class(**hyperparameters)
+        # key/value pair is legitimate for this model_type — PLUS
+        # random_state, always, for every model_type, regardless of
+        # whether that particular model's stochasticity would actually
+        # matter for a given run. Safe to unpack alongside
+        # **hyperparameters: schema never defines "random_state" as a
+        # tunable param (see tools.py), so Gemini can never supply one
+        # and collide with this.
+        estimator = estimator_class(**hyperparameters, random_state=random_state)
 
         # Wrap ONLY the fit call — not the whole function — so warnings
         # from schema validation or anything else above/below this block

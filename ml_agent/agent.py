@@ -114,6 +114,18 @@ def build_dispatch_table(
         train_model/evaluate_model via functools.partial, so Gemini's
         dispatch never sees any of this data as an argument at all
 
+    random_state -- CHANGED 2026-07-29: this parameter already existed
+    and was already used below for train_test_split, but was previously
+    NEVER passed on into Trainer.train_model itself. Confirmed with
+    Melanie: reuse this SAME seed for both the split AND every model's
+    own internal randomness (RandomForestClassifier's bagging, etc.),
+    rather than introducing a second, separate seed. Closes a real
+    finding from this session: RandomForestClassifier had no
+    random_state at all previously, so two runs with identical
+    hyperparameters could produce different confusion matrices.
+    bound_train below now passes random_state through the same way
+    X_train/y_train already were.
+
     The returned DispatchResult.dispatch_table maps each of the five tool
     names exactly as Gemini will return them to a ready-to-call callable:
       - Category A (list_available_models, train_model, evaluate_model)
@@ -141,7 +153,12 @@ def build_dispatch_table(
     validate_split(y_train, y_test, pos_label, min_count=5)
 
     trainer = Trainer()
-    bound_train = partial(trainer.train_model, X_train=X_train, y_train=y_train)
+    bound_train = partial(
+        trainer.train_model,
+        X_train=X_train,
+        y_train=y_train,
+        random_state=random_state,
+    )
     bound_evaluate = partial(
         trainer.evaluate_model, X_test=X_test, y_test=y_test, pos_label=pos_label
     )
@@ -239,6 +256,10 @@ def run_session(
     Whichever CLI entry point (main.py, not built this session) is
     responsible for actually asking the person what to optimize for and
     passing the answer in here.
+
+    random_state: passed straight through to build_dispatch_table
+    unchanged -- see that function's docstring (2026-07-29 update) for
+    what it's now used for beyond just the train/test split.
 
     log_iterations: off by default (False), passed straight through to
     run_agent_loop unchanged -- see that function's docstring for what
