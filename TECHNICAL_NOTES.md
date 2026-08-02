@@ -1118,3 +1118,152 @@ Five commits, ordered so each leaves the repo in a working state (foundation-bef
 4. `trainer.py` + `agent.py` together, as one commit (the reproducibility fix — neither half does anything alone; splitting them would leave an intermediate commit where the feature is only half-wired)
 
 Deliberately grouped at file level with multi-bullet commit messages, rather than fully atomic per-change commits via `git add -p` — several distinct changes landed in overlapping regions of the same functions this session (e.g. `main.py`'s `main()`), making hunk-level splitting more fiddly than it was worth for a solo-author, not-yet-public project at this stage.
+
+## Part 7: Results reporting (`reporting.py`), a real final-model bug fix, and a pytest collection bug (2026-08-01)
+
+### 7.1 The bug: "last `evaluate_model` in the log = final model" was wrong
+
+While extending `compare_runs.py`'s `summarize_run()` to also surface hyperparameters and run config (needed for §7.3 below), a real file exposed a bug in the existing "final model" heuristic: `result_log_2026_07_29_232959_breast_cancer.json` evaluated three models —
+
+```
+evaluate #1: logistic_regression                    recall 0.9583
+evaluate #2: logistic_regression, max_iter=500       recall 0.9722
+evaluate #3: random_forest (evaluated LAST)          recall 0.9583
+```
+
+— and its own `record_convergence_decision` reasoning explicitly named evaluate #2 ("recall of 0.972... outperformed the random forest model tested") as the chosen model. The old rule — "whichever `evaluate_model` call appears last in the log is the final model" — picked `random_forest` instead, silently misreporting the run. This was a previously-flagged, unverified risk (`summarize_run`'s own docstring named this exact scenario as "not observed in any real run yet"); this session confirmed it does happen.
+
+### 7.2 Fix: best-by-target resolution, plus a structural mismatch flag
+
+Root-caused in `compare_runs.py` (not worked around downstream), since a `comparison_*.json` file is built entirely from `summarize_run()`'s output — any data not captured there is unrecoverable later.
+
+```python
+# Every evaluate_model call this run, in encounter order — not
+# collapsed to "the last one" anymore:
+evaluations: list[dict[str, Any]] = []
+...
+# --- Resolve the "final" model -------------------------------------
+last_eval = evaluations[-1] if evaluations else None
+best_eval = last_eval
+final_model_ambiguous: bool | None = None
+
+if target in KNOWN_METRICS and evaluations:
+    scored = [e for e in evaluations if e["metrics"].get(target) is not None]
+    if scored:
+        best_eval = max(scored, key=lambda e: e["metrics"][target])
+        final_model_ambiguous = (
+            last_eval is not None and best_eval["model_ref"] != last_eval["model_ref"]
+        )
+```
+
+The "final" model is now whichever evaluated model scores **highest on `config["target"]`'s metric** — not whichever was evaluated last. `config["target"]` is a structural fact already persisted by `main.py`, not something parsed out of Gemini's free-text reasoning (parsing that reasoning was considered and rejected as too fragile — paraphrasing, model-name casing, etc.).
+
+Files predating `config` entirely (pre-2026-07-29) have no target to rank by, so they fall back to the original "last evaluated" behavior unchanged — their `final_model_type` may still reflect the old, unverifiable heuristic; this is an inherent limit of missing historical data, not something today's fix can retroactively correct.
+
+Because the heuristic can, rarely, still disagree with what the reasoning text literally says (§7.1 is proof), `summarize_run()` now also returns **`final_model_ambiguous`**: `True` when target is known and the best-by-target pick differs from the old last-evaluated pick, `False` when they agree, `None` when target is unknown (nothing to compare). This is a cheap, purely structural signal — not an attempt to adjudicate or explain the disagreement.
+
+**Explicitly considered and deferred:** having `reporting.py` make a second, live Gemini call to explain or resolve a flagged mismatch. Rejected for this session — it would make a currently offline, free, deterministic module depend on the network and an API key, and overlaps directly with the still-undesigned human-in-the-loop hook (item #6) and `Agent-decisions.md` generator (item #12). Belongs in that future design conversation, not bolted on here.
+
+### 7.3 `ml_agent/reporting.py`: CSV export and Markdown viewer
+
+New module — TODO #10 (CSV, Melanie's named gate before making the repo public) and TODO #4 (Markdown viewer, design agreed 2026-07-24: Markdown output, auto-detect by filename) both land here, sharing one data path:
+
+```
+result_log_*.json ──► summarize_run() ──► one row
+                         │  (dataset/target/random_state from config,
+                         │   final_hyperparameters + final_model_ambiguous
+                         │   resolved by model_ref, per §7.2)
+                         ▼
+comparison_*.json  = [ rows ]   (build_comparison(), unchanged shape)
+
+reporting.py:
+  result_log_*.json ──► load_rows() ──► summarize_run() ──► [1 row]
+  comparison_*.json ──► load_rows() ──► json.loads()     ──► [N rows]
+                              │
+                    ┌─────────┴─────────┐
+                    ▼                   ▼
+                to_csv()           to_markdown()
+              (main.py export)    (main.py report)
+```
+
+**Auto-detect (Option A, confirmed with Melanie):** filename-prefix matching only — `result_log_` → re-summarize via `summarize_run()`; `comparison_` → already a list of rows, loaded directly. No JSON-content-inspection fallback; explicitly not expected to be needed, since these filenames aren't renamed by hand.
+
+```python
+def detect_kind(path: Path) -> Kind:
+    if path.name.startswith("result_log_"):
+        return "single"
+    if path.name.startswith("comparison_"):
+        return "comparison"
+    raise ValueError(f"Can't tell what kind of results file {path.name!r} is...")
+```
+
+`_run_report` (main.py, §7.4) wraps this in a `try/except ValueError`, printing the message cleanly rather than a raw traceback — the one deliberately-fixed rough edge from testing.
+
+**CSV shape:** one row per run (not one row per evaluated model — considered, rejected: a spreadsheet's value is glanceable cross-run comparison, and multiple rows per run would break sortability). Nested fields (`final_hyperparameters`, `confusion_matrix`, `warnings_encountered`) are serialized to compact JSON strings within their cell, round-trippable with `json.loads()`.
+
+**Markdown shape, single run:** config → status/timing → final model (type, hyperparameters, metrics) → the `⚠️` ambiguity note when `final_model_ambiguous` is `True` → full model-sequence trail → convergence reasoning verbatim → warnings. **Comparison:** a GitHub-native Markdown table, one row per run, with a dedicated `⚠️` column.
+
+### 7.4 `main.py`: `export` and `report` subcommands
+
+Both mirror the existing `compare` subcommand's pattern exactly — same subcommand-sniffing mechanism (`raw_argv[0]` checked before argparse runs), same required-`--dataset`-with-interactive-fallback logic for `export`.
+
+```python
+raw_argv = sys.argv[1:]
+if raw_argv and raw_argv[0] == "compare":
+    _run_compare(raw_argv[1:]); return
+if raw_argv and raw_argv[0] == "export":
+    _run_export(raw_argv[1:]); return
+if raw_argv and raw_argv[0] == "report":
+    _run_report(raw_argv[1:]); return
+```
+
+`export --dataset NAME` calls `build_comparison()` directly (in-memory), not requiring an existing `comparison_*.json` on disk first — an export always reflects every field `summarize_run()` currently produces, never a possibly-stale prior comparison file. `report <path>` accepts either file kind via §7.3's auto-detect.
+
+### 7.5 Item #17 resolved: standalone `compare_runs.py` entry point now requires a dataset
+
+Previously, `python -m ml_agent.compare_runs` called `build_comparison(dataset_name=None)`, silently mixing every dataset's runs into one file — the exact thing `main.py compare`/`export` explicitly forbid elsewhere. This was flagged as a genuinely open question as far back as 2026-07-29 (§6.3 above). Resolved this session (Option A, confirmed with Melanie): the standalone entry point now requires a dataset too — positional arg, or an interactive prompt on omission/typo — matching `main.py`'s subcommands exactly. `build_comparison()` itself is unchanged and still *accepts* `dataset_name=None` as a general-purpose function signature; nothing in the project calls it that way anymore.
+
+### 7.6 A latent bug found via manual testing: pytest silently importing and executing `run_smoke_test.py`
+
+Reproduced three times: `uv run pytest` was intermittently producing a real `results/smoke_test_log_<timestamp>.json` file, containing a genuine completed agent run (real Gemini API calls, real timestamps) — despite no test in the suite doing anything like that.
+
+**Root cause:** pytest's default collection glob (`test_*.py` **or** `*_test.py`) matches `run_smoke_test.py` (ends in `_test.py`) with nothing in `pyproject.toml` restricting collection to `tests/`. Pytest therefore imported `run_smoke_test.py` as a candidate test module during collection — and since that file's entire body (the real `run_session()` call, network request, and file write) is top-level code, not guarded by `if __name__ == "__main__":` or wrapped in a function, **importing it executes it in full**. Pytest then finds zero test functions inside and moves on silently — no error, no visible signal, just a real API call and a real file write on every test run.
+
+**Fix, `pyproject.toml`:**
+
+```toml
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]   # NEW — restricts collection to tests/ only
+```
+
+Verified: re-ran `pytest` three times back-to-back post-fix, no new `smoke_test_log_*.json` files appeared; `pytest -v`'s collected-item list no longer includes anything from `run_smoke_test.py`.
+
+**Relationship to the already-documented rate-limit finding (§6.5 / item #8):** the *confirmed, reproduced* cause of the free-tier `429 RESOURCE_EXHAUSTED` error remains what it always was — running `main.py` sessions back-to-back exceeds the 15-requests/minute quota, and Melanie's practice of waiting between runs is a correct, deliberate response to that. This pytest bug is a **newly discovered, additional, previously invisible contributor** — every `pytest` run was silently consuming one request against the same quota, via a call the person running it had no way to know was happening. Not a replacement explanation; a new one, layered on top of the known one.
+
+### 7.7 Test coverage added: `test_compare_runs.py`, `test_reporting.py`
+
+Neither `summarize_run()`'s final-model resolution logic (§7.2) nor `reporting.py` (§7.3) had any automated coverage before this session — the breast_cancer mismatch (§7.1) was caught by manual inspection, not a test. Two new files close this gap:
+
+- **`tests/test_compare_runs.py`** — hand-built `run_data` dicts (not real files) covering: best-by-target overriding last-evaluated (the exact §7.1 scenario), the two agreeing (no false-positive flag), no-`target` fallback to old behavior with `final_model_ambiguous is None`, a single-evaluation run (trivially non-ambiguous), and a run with zero completed evaluations (all final_* fields `None`).
+- **`tests/test_reporting.py`** — `detect_kind()` on all three filename cases, `load_rows()` confirming a `result_log_*` file gets re-summarized into exactly one row while a `comparison_*` file's rows are loaded verbatim, fixed CSV column ordering with valid JSON-string nested fields, and that the `⚠️` mismatch indicator renders correctly (and *only* when `final_model_ambiguous` is `True`) in both Markdown formats.
+
+**Known remaining gap, flagged not fixed:** `main.py`'s `_run_export`/`_run_report` CLI wiring itself (argument parsing, the interactive-prompt fallback, actual file-write side effects) has no test coverage — only the underlying logic they call does. Would need `tmp_path`, `pytest-mock`'s `mocker` for faking `input()`, and `capsys` for asserting on printed output. Not started this session.
+
+### 7.8 Correction: the `TOOL_FUNCTIONS` override-guard test already existed — dated precisely
+
+`agent.py`'s `build_dispatch_table` docstring (see Part 2, §2.x) carried a note describing a risk — a silent rename of `train_model`/`evaluate_model` in `tools.py` breaking `build_dispatch_table`'s override logic undetected — with a named mitigation marked "not built this session." This was stale: `test_tools.py::test_dispatch_table_override_keys_exist` already guards exactly this, and per this session's `git log` review, **was added 2026-07-17** (commit `7ea14c7`, the same session as the orchestration-wiring work in Part 2) — not left mysteriously untracked, as first assumed before checking. Both the docstring and the running TODO list had simply gone stale without being updated when the test was added; corrected this session, in `agent.py` and the TODO list, with the confirmed real date.
+
+**Process note for future sessions:** this is the second time in this project's history that a fix landed without its corresponding docstring/TODO note being updated in the same commit (see also: `random_state` threading, §6.6, which *was* documented correctly). Worth deliberately double-checking, before marking any item "not yet built" in a docstring or TODO, whether a `git log`/`grep` across the test suite already contradicts that claim — cheap to check, and avoids exactly this kind of drift.
+
+### 7.9 Git commit ordering, this session
+
+Five commits, `ed0826d` (07-30 session's final commit) as the base:
+
+1. `pyproject.toml` — the `testpaths` fix (§7.6), independent of everything else, found mid-session
+2. `ml_agent/compare_runs.py` — both the final-model resolution fix (§7.1–7.2) and the item #17 standalone-entry-point restriction (§7.5), squashed into one commit since both edits had already been made to the file together before any commit happened
+3. `ml_agent/reporting.py` (new) + `main.py` — the `export`/`report` feature (§7.3–7.4)
+4. `tests/test_compare_runs.py` + `tests/test_reporting.py` (new) — §7.7
+5. `agent.py` — the docstring correction (§7.8)
+
+Verified clean before push: `git status` showed a clean working tree, 5 commits ahead of `origin/main`/`acer/main`, with `git log --oneline` confirming the base commit matched exactly what both Melanie and Claude had independently verified at session start.
