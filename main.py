@@ -9,6 +9,10 @@
 # specifically, are never silently decided on the caller's behalf),
 # then calls run_session exactly the way run_smoke_test.py already
 # does. No new orchestration logic lives here.
+#
+# `export` and `report` subcommands added 2026-07-31 -- both thin
+# wrappers around reporting.py, same "no new logic in main.py" principle
+# already used for `compare` below.
 
 from __future__ import annotations
 
@@ -27,6 +31,7 @@ from ml_agent.agent import run_session
 from ml_agent.compare_runs import build_comparison
 from ml_agent.dataset import DATASET_LOADERS
 from ml_agent.gemini_client import DEFAULT_MODEL, MAX_ITERATIONS, format_log
+from ml_agent.reporting import load_rows, to_csv, to_markdown
 
 # The exact four metrics evaluate_model computes and returns (trainer.py)
 # -- optimization_target is constrained to this set so Gemini is never
@@ -87,9 +92,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             "Run one full ml-agent session: Gemini proposes, trains, and "
             "evaluates scikit-learn models against a chosen dataset, using "
             "the given optimization target. "
-            "(Also see the separate 'compare' subcommand: "
-            "`python main.py compare` -- compares all persisted past runs "
-            "instead of starting a new one.)"
+            "(Also see the separate 'compare', 'export', and 'report' "
+            "subcommands: `python main.py compare` compares all persisted "
+            "past runs; `python main.py export` writes them to CSV; "
+            "`python main.py report <file>` renders a Markdown viewer for "
+            "one run or one comparison file -- see each subcommand's own "
+            "--help. A lower-level standalone entry point, "
+            "`python -m ml_agent.compare_runs <dataset>`, also exists for "
+            "ad-hoc comparisons without going through this CLI -- same "
+            "one-dataset-at-a-time rule applies.)"
         )
     )
     parser.add_argument(
@@ -217,16 +228,146 @@ def _run_compare(argv: list[str]) -> None:
     print(f"Compared {len(rows)} run(s) for dataset={dataset_name!r} -> {out_path}")
 
 
+def _run_export(argv: list[str]) -> None:
+    """Handles `python main.py export --dataset NAME [--results-dir DIR] [--out PATH]`.
+
+    CSV spreadsheet export -- TODO #10, Melanie's explicitly named gate
+    before making the repo public. Mirrors `compare`'s exact pattern:
+    --dataset is REQUIRED for the same reason build_comparison() already
+    enforces it (mixing datasets' metrics into one file is never
+    allowed) -- reuses that same required-dataset + interactive-picker-
+    on-omission logic, not a second copy of it.
+
+    Deliberately calls build_comparison() directly (compare_runs.py)
+    rather than requiring an existing comparison_*.json file on disk
+    first -- an export is "give me every run for this dataset as a
+    spreadsheet," which is exactly what build_comparison() already
+    gathers in memory; writing an intermediate JSON file first would be
+    a pointless extra step. This also means an export always reflects
+    every field summarize_run() currently produces (hyperparameters,
+    dataset/target/random_state included), since it's not reading an
+    older, possibly-stale comparison_*.json file.
+    """
+    parser = argparse.ArgumentParser(
+        prog="main.py export",
+        description=(
+            "Export all persisted results/result_log_*.json runs for ONE "
+            "dataset to a single CSV file, suitable for opening in Excel/"
+            "Google Sheets. --dataset is required -- comparing/exporting "
+            "runs across different datasets would mix metrics that aren't "
+            "comparable against different data, so this is never allowed."
+        ),
+    )
+    parser.add_argument(
+        "--dataset",
+        default=None,
+        help=(
+            "Dataset to export runs for. Required -- if omitted or not a "
+            f"real dataset name ({', '.join(DATASET_LOADERS.keys())}), "
+            "you'll be prompted to choose one interactively."
+        ),
+    )
+    parser.add_argument(
+        "--results-dir",
+        type=Path,
+        default=Path("results"),
+        help="Directory to scan for result_log_*.json files (default: results/).",
+    )
+    parser.add_argument(
+        "--out",
+        type=Path,
+        default=None,
+        help="Output CSV path (default: results/export_<timestamp>_<dataset>.csv).",
+    )
+    args = parser.parse_args(argv)
+
+    dataset_name = args.dataset
+    if dataset_name is None:
+        print(
+            "A dataset name is required to export runs -- mixing datasets "
+            "would combine metrics that aren't comparable against different data."
+        )
+        dataset_name = _prompt_for_dataset()
+    elif dataset_name not in DATASET_LOADERS:
+        print(f"Unrecognized dataset {dataset_name!r}.")
+        dataset_name = _prompt_for_dataset()
+
+    rows = build_comparison(args.results_dir, dataset_name=dataset_name)
+
+    if not rows:
+        print(f"No result_log_*_{dataset_name}.json files found in {args.results_dir}/ yet -- nothing to export.")
+        return
+
+    out_path = args.out
+    if out_path is None:
+        timestamp = datetime.now(timezone.utc).strftime("%Y_%m_%d_%H%M%S")
+        out_path = args.results_dir / f"export_{timestamp}_{dataset_name}.csv"
+
+    to_csv(rows, out_path)
+    print(f"Exported {len(rows)} run(s) for dataset={dataset_name!r} -> {out_path}")
+
+
+def _run_report(argv: list[str]) -> None:
+    """Handles `python main.py report <path> [--out PATH]`.
+
+    Human-friendly Markdown viewer -- TODO #4, design agreed 2026-07-24
+    (Markdown output, auto-detect by filename), built 2026-07-31.
+
+    <path> can be EITHER a result_log_*.json (one run) or a
+    comparison_*.json (several runs already summarized) --
+    reporting.py's load_rows()/to_markdown() auto-detect which, by
+    filename prefix only (Option A, confirmed with Melanie 2026-07-31:
+    no JSON-content-inspection fallback -- these filenames aren't
+    expected to be renamed by hand).
+    """
+    parser = argparse.ArgumentParser(
+        prog="main.py report",
+        description=(
+            "Render a result_log_*.json (one run) or comparison_*.json "
+            "(several runs) as a human-friendly Markdown report."
+        ),
+    )
+    parser.add_argument(
+        "path",
+        type=Path,
+        help="Path to a result_log_*.json or comparison_*.json file.",
+    )
+    parser.add_argument(
+        "--out",
+        type=Path,
+        default=None,
+        help="Output .md path (default: same name as input, .md extension).",
+    )
+    args = parser.parse_args(argv)
+
+    if not args.path.exists():
+        print(f"File not found: {args.path}")
+        return
+
+    try:
+        rows, kind = load_rows(args.path)
+    except ValueError as e:
+        print(str(e))
+        return
+    markdown = to_markdown(rows, kind, source_file=args.path.name)
+
+    out_path = args.out or args.path.with_suffix(".md")
+    out_path.write_text(markdown)
+    print(f"Rendered {kind} report for {args.path.name} -> {out_path}")
+
+
 def main() -> None:
     # Subcommand sniffing, done BEFORE argparse sees anything -- this is
-    # what makes "compare" a sibling of the default run path without
-    # requiring every existing invocation to be retyped with a leading
-    # "run" (confirmed with Melanie 2026-07-29, chosen specifically so
-    # `python main.py --dataset X` keeps working exactly as it does
-    # today, unchanged):
+    # what makes "compare"/"export"/"report" siblings of the default run
+    # path without requiring every existing invocation to be retyped
+    # with a leading "run" (confirmed with Melanie 2026-07-29 for
+    # "compare"; same pattern extended 2026-07-31 for "export"/"report"):
     #   python main.py compare ...   -> handled entirely by _run_compare,
-    #                                    returns immediately, never
-    #                                    touches run_session at all.
+    #                                    returns immediately.
+    #   python main.py export ...    -> handled entirely by _run_export,
+    #                                    returns immediately.
+    #   python main.py report ...    -> handled entirely by _run_report,
+    #                                    returns immediately.
     #   python main.py run ...       -> "run" token stripped, everything
     #                                    else below proceeds exactly as
     #                                    if "run" had never been typed.
@@ -235,6 +376,12 @@ def main() -> None:
     raw_argv = sys.argv[1:]
     if raw_argv and raw_argv[0] == "compare":
         _run_compare(raw_argv[1:])
+        return
+    if raw_argv and raw_argv[0] == "export":
+        _run_export(raw_argv[1:])
+        return
+    if raw_argv and raw_argv[0] == "report":
+        _run_report(raw_argv[1:])
         return
     if raw_argv and raw_argv[0] == "run":
         raw_argv = raw_argv[1:]
