@@ -1,6 +1,6 @@
 # ml-agent
 
-_Last updated: 2026-07-30_
+_Last updated: 2026-08-01_
 
 Agentic ML experimentation assistant — an LLM (Gemini) orchestrates dataset inspection, model proposal, training, and evaluation over scikit-learn via native function-calling, iterating toward a target metric in a supervised loop.
 
@@ -12,10 +12,11 @@ Agentic ML experimentation assistant — an LLM (Gemini) orchestrates dataset in
 - `agent.py` — ✅ **orchestration loop wired end-to-end (2026-07-17), verified via 3 real live runs.** `build_dispatch_table` now returns a `DispatchResult` (dispatch table + the run's `X`/`y`), and `run_session(dataset_name, optimization_target)` connects it, `inspect_dataset`, and `gemini_client.run_agent_loop` into one real, callable entry point — see "`agent.py` — wiring the dispatch table" below. `run_session` also now forwards an optional `log_iterations` flag (2026-07-19) straight through to `run_agent_loop` — see "Per-iteration logging" below. **`build_dispatch_table`'s `random_state` is now also bound into `Trainer.train_model` (2026-07-29)**, not just the train/test split — see "Reproducibility: seeding every estimator" below.
 - `gemini_client.py` — ✅ **done and verified.** Implements the full agent loop: sends dataset context + tool schemas to Gemini, dispatches whichever tool call comes back, feeds results back, repeats until convergence or a max-iterations guard. Verified via multiple real end-to-end runs across both datasets (see "Data Science Notes" below). **Now also supports optional per-iteration logging (2026-07-19)** — see "Per-iteration logging" below. **`MAX_ITERATIONS` raised from 10 to 15 (2026-07-27)** — the 07-12 debugging-safety-net rationale for keeping it small was explicitly conditioned on "once the loop is trusted end-to-end"; 9 live runs across two sessions, plus a `main.py` run that hit the old ceiling mid-retry on legitimate in-progress work, met that condition — see "`gemini_client.py` — the agent loop" below.
 - `test_tools.py` — ✅ **done, 12 tests passing (2026-07-15, extended 2026-07-19).** The `TOOL_SCHEMAS` ↔ real-function signature drift check, using `inspect.signature()`, plus a guard on the two dispatch-table override keys. See "`test_tools.py` — the schema/function drift check" below. **Review resolved (2026-07-27):** `train_model`'s new `warnings` return key needed no update here — every assertion in this file inspects a function's *parameters* via `inspect.signature()`, never its return value, and `train_model`'s own parameter list is unchanged.
-- **`compare_runs.py` (2026-07-24) — ✅ done, verified against 6 real live runs, plus several more since.** Turns several persisted run files into one `comparison_<timestamp>_<dataset>.json`, summarizing each run's model sequence, final metrics, any warnings encountered, and elapsed time. **Renamed and dataset-scoped (2026-07-29):** the underlying files are now `result_log_<timestamp>_<dataset_name>.json` (was `smoke_test_log_<timestamp>.json`), and `build_comparison` now accepts an optional `dataset_name` filter — comparing runs across two different datasets was judged never acceptable, since their metrics aren't comparable against different data. See "Cross-run comparison" below.
-- **`main.py` (2026-07-27; extended 2026-07-29) — ✅ done.** The real, committed public entry point — `run_smoke_test.py` (gitignored, hardcoded) was never reachable by anyone cloning the repo. Interactive/CLI hybrid: prompts for `--dataset`/`--target` only when omitted, everything else silently defaults. **New `compare` subcommand (2026-07-29):** `python main.py compare --dataset NAME` surfaces `compare_runs.py` under the same entry point as `run`, without requiring a separate script invocation to be discovered. See "`main.py` — the CLI entry point" below.
-- **Human-in-the-loop hook (2026-07-19): scope agreed, implementation still deferred.** The confirmation step described below (Category B → Category A handoff) will combine hyperparameter edge-case flagging, reasoning/action contradiction detection, and stalled/repeated-proposal detection — deliberately not a per-proposal approval gate, and deliberately not limited to reviewing only the final result. Build is intentionally deferred until the project is close to a finished, working state, not before — see "Roadmap context" below. **A related, distinct idea raised 2026-07-27:** a post-hoc `Agent-decisions.md` generator (human-readable decision/reasoning report per run, written incrementally) — architecture agreed, not built; see "Roadmap context."
-- Also not yet started: `test_trainer.py`, `AGENTS.md`, and a human-friendly viewer for the JSON result files (design agreed 2026-07-24 — auto-detects a single-run vs. a comparison file by name, renders as Markdown — not yet built).
+- **`compare_runs.py` (2026-07-24) — ✅ done, verified against 6 real live runs, plus several more since.** Turns several persisted run files into one `comparison_<timestamp>_<dataset>.json`, summarizing each run's model sequence, final metrics, any warnings encountered, and elapsed time. **Renamed and dataset-scoped (2026-07-29):** the underlying files are now `result_log_<timestamp>_<dataset_name>.json` (was `smoke_test_log_<timestamp>.json`), and `build_comparison` now accepts an optional `dataset_name` filter — comparing runs across two different datasets was judged never acceptable, since their metrics aren't comparable against different data. **Final-model resolution fixed, and the standalone entry point dataset-restricted (2026-08-01):** `summarize_run`'s "last evaluated = final model" rule was confirmed wrong on a real file; final model is now resolved by best score on the run's own optimization target, with a `final_model_ambiguous` flag surfacing any disagreement. `python -m ml_agent.compare_runs` now also requires a dataset, matching `main.py`. See "Cross-run comparison" and "Results reporting" below.
+- **`main.py` (2026-07-27; extended 2026-07-29, 2026-08-01) — ✅ done.** The real, committed public entry point — `run_smoke_test.py` (gitignored, hardcoded) was never reachable by anyone cloning the repo. Interactive/CLI hybrid: prompts for `--dataset`/`--target` only when omitted, everything else silently defaults. **`compare` subcommand (2026-07-29):** `python main.py compare --dataset NAME` surfaces `compare_runs.py` under the same entry point as `run`. **`export` and `report` subcommands (2026-08-01):** CSV spreadsheet export and a human-friendly Markdown viewer, both mirroring `compare`'s pattern — see "`main.py` — the CLI entry point" and "Results reporting" below.
+- **`ml_agent/reporting.py` (2026-08-01) — ✅ done.** CSV export (the project's named gate before going public) and a Markdown viewer (single-run or cross-run comparison, auto-detected by filename) — both built on `compare_runs.py`'s `summarize_run()`. See "Results reporting: CSV export and the Markdown viewer" below.
+- **Human-in-the-loop hook (2026-07-19): scope agreed, implementation still deferred.** The confirmation step described below (Category B → Category A handoff) will combine hyperparameter edge-case flagging, reasoning/action contradiction detection, and stalled/repeated-proposal detection — deliberately not a per-proposal approval gate, and deliberately not limited to reviewing only the final result. Build is intentionally deferred until the project is close to a finished, working state, not before — see "Roadmap context" below. **A related, distinct idea raised 2026-07-27:** a post-hoc `Agent-decisions.md` generator (human-readable decision/reasoning report per run, written incrementally) — architecture agreed, not built; see "Roadmap context." **A second, more specific idea raised 2026-08-01:** using a live Gemini call to adjudicate a run flagged `final_model_ambiguous` (see "Results reporting" below) — considered and folded into this same future design conversation rather than built standalone.
+- Also not yet started: `test_trainer.py`, `AGENTS.md`, and CLI-layer tests for `main.py`'s `export`/`report` subcommands (flagged 2026-08-01 — the underlying `reporting.py`/`compare_runs.py` logic is tested; the argument-parsing/file-writing glue around it isn't yet).
 
 ---
 
@@ -405,7 +406,7 @@ results/comparison_<timestamp>_<dataset>.json  — one row per run
 
 `build_comparison(results_dir=Path("results"), dataset_name=None)` scans for matching result files and calls `summarize_run` on each — not capped at any particular count, whether that's 2 files or 20.
 
-**Two judgment calls worth stating plainly** — true of every run observed so far, but not independently verified as universal: "final model" is read as the *last* `evaluate_model` call in a run's log, not cross-checked against the wording of its convergence decision; and `convergence_reasoning` is taken from the *last* `record_convergence_decision` entry seen, even on a run that hit `max_iterations` without ever setting `continue_iterating=False`.
+**One of these two judgment calls has since been resolved with a real fix; the other remains a stated limitation.** "Final model" was originally read as the *last* `evaluate_model` call in a run's log — **confirmed wrong on a real file (2026-08-01):** a run can evaluate one extra model purely for comparison after already deciding, and the convergence reasoning can name an earlier evaluation as the actual choice. Final model is now resolved as whichever evaluated model scores highest on the run's own optimization target instead, with a new `final_model_ambiguous` field flagging any disagreement between the two approaches for a human reader's attention — see "Results reporting" below for the full writeup and the real example that surfaced it. `convergence_reasoning` is still taken from the *last* `record_convergence_decision` entry seen, even on a run that hit `max_iterations` without ever setting `continue_iterating=False` — unchanged, not independently verified as universal.
 
 ### Renamed and dataset-scoped (2026-07-29)
 
@@ -426,7 +427,9 @@ python main.py run --dataset climate    # explicit form, same result
 python main.py compare --dataset climate
 ```
 
-`--dataset` is required for `compare` — if omitted or misspelled, it prints a warning explaining why (mixing datasets isn't allowed) and falls back to the same interactive picker `run` already uses, rather than a bare argparse usage error. The standalone `python -m ml_agent.compare_runs` invocation still exists and still scans everything unfiltered by default — kept for now as a lower-level, less-restricted path, since `main.py compare` is the primary, documented, gated way to do this going forward.
+`--dataset` is required for `compare` — if omitted or misspelled, it prints a warning explaining why (mixing datasets isn't allowed) and falls back to the same interactive picker `run` already uses, rather than a bare argparse usage error. **Resolved (2026-08-01):** the standalone `python -m ml_agent.compare_runs` invocation now requires a dataset too (positional argument, or the same interactive prompt on omission) — it previously scanned everything unfiltered by default, an inconsistency flagged as an open question back on 2026-07-29 and left undecided until now.
+
+Two further subcommands, `export` and `report`, build directly on this same comparison data — see "Results reporting: CSV export and the Markdown viewer" below.
 
 ### Verified against real data
 
@@ -435,6 +438,62 @@ Across six real Climate Crashes runs from a single evening: correctly distinguis
 ### Known limitation, reproduced and documented, still not fixed
 
 A run that crashes before completing (e.g. hitting the Gemini API's own free-tier rate limit — a real 429 `RESOURCE_EXHAUSTED` error, reproduced 2026-07-29 by running two sessions back-to-back within the same minute) writes no file at all — a failed attempt is currently invisible to this comparison, not just excluded from it. `main.py` now prints a note at startup warning that back-to-back runs can hit this limit. The underlying gap remains an accepted limitation, not a planned fix; see "Roadmap context."
+
+---
+
+## Results reporting: CSV export and the Markdown viewer (2026-08-01)
+
+### Why this exists
+
+Two long-standing items on the project's own named roadmap — a human-friendly viewer for result/comparison files, and a CSV/spreadsheet export (explicitly named as the gate before making this repo public) — turned out to share one underlying need: turning a `result_log_*.json` or `comparison_*.json` file into flat, comparable rows. `ml_agent/reporting.py` builds that shared path once, then exposes two thin, format-specific outputs.
+
+### How it works
+
+```
+result_log_*.json ──► summarize_run() ──► one row
+                         │  (dataset/target/random_state from config,
+                         │   final_hyperparameters + final_model_ambiguous
+                         │   resolved by model_ref — see below)
+                         ▼
+comparison_*.json  = [ rows ]   (build_comparison(), unchanged shape)
+
+reporting.py:
+  result_log_*.json ──► load_rows() ──► summarize_run() ──► [1 row]
+  comparison_*.json ──► load_rows() ──► json.loads()     ──► [N rows]
+                              │
+                    ┌─────────┴─────────┐
+                    ▼                   ▼
+                to_csv()           to_markdown()
+              (main.py export)    (main.py report)
+```
+
+`load_rows(path)` auto-detects which kind of file it's looking at by filename prefix only (`result_log_` vs `comparison_`) — no content inspection, since these filenames aren't expected to be renamed by hand. An unrecognized filename raises a clean, caught error rather than a raw traceback.
+
+`to_csv()` writes one row per run (not one row per model evaluated within a run) against a fixed column order, so every export has the same shape regardless of which fields a given row happens to have populated; nested fields (hyperparameters, confusion matrix, warnings) are serialized as compact JSON strings within their cell. `to_markdown()` renders a single run as a narrative report (config, final model, full model-sequence trail, convergence reasoning verbatim, warnings) or several runs as a GitHub-native Markdown table — auto-selected by the same `load_rows()` detection.
+
+### A real bug found while building this: "last evaluated = final model" was wrong
+
+Extending `summarize_run()` (see "Cross-run comparison" above) to also surface hyperparameters surfaced a genuine bug in its existing final-model heuristic. On a real file, three models were evaluated — `logistic_regression` (recall 0.9583), `logistic_regression` with `max_iter=500` (recall **0.9722**), then `random_forest` evaluated *last* (recall 0.9583) purely as a comparison point. The run's own `record_convergence_decision` reasoning explicitly named the 0.9722 model as chosen — but the old "last `evaluate_model` call in the log wins" rule picked `random_forest` instead, silently misreporting the run.
+
+**Fixed:** the final model is now resolved as whichever evaluated model scores highest on the run's own optimization target (`config["target"]`) — a structural, metric-based resolution, not text-parsing of the free-text reasoning field (considered and rejected as too fragile). Older files with no `config` block fall back to the original last-evaluated behavior unchanged. Because this heuristic can, rarely, still disagree with the literal reasoning text (the case above is proof it happens), `summarize_run()` also returns a new `final_model_ambiguous` field — `True` when the best-by-target pick differs from the old last-evaluated pick, `False` when they agree, `None` when there's no target to compare against. This surfaces as a `⚠️` note in the Markdown viewer and a plain column in the CSV export, rather than being silently resolved either way.
+
+**Explicitly considered and deferred:** using a second, live Gemini call to adjudicate a flagged mismatch. This would add a network/API dependency to what's otherwise an offline, deterministic module, and overlaps directly with the still-undesigned human-in-the-loop hook and `Agent-decisions.md` generator (see "Roadmap context") — folded into that future design conversation rather than built here.
+
+### The `export` and `report` subcommands
+
+Both live in `main.py`, mirroring `compare`'s existing pattern exactly:
+
+```bash
+uv run python main.py export --dataset climate    # → results/export_<timestamp>_<dataset>.csv
+uv run python main.py report results/result_log_2026_07_27_223458_climate.json
+uv run python main.py report results/comparison_2026_08_01_125444_climate.json
+```
+
+`export` requires `--dataset`, same as `compare` — comparing/exporting across datasets is never allowed. `report` accepts either a single-run or comparison file, auto-detected as above, and writes a `.md` file next to the input by default (overridable with `--out`).
+
+### Verified against real data
+
+Both subcommands run against real Climate Crashes and Breast Cancer result files, including the confirmed final-model fix (re-verified on the file that originally surfaced the bug, plus a second, independent file). Two automated test files (`tests/test_compare_runs.py`, `tests/test_reporting.py`) now lock in the resolution logic and rendering behavior — see "Testing" below.
 
 ---
 
@@ -732,7 +791,7 @@ The orchestration loop itself is wired and verified (see "Data Science Notes" be
 
 ---
 
-## `main.py` — the CLI entry point (2026-07-27; extended 2026-07-29)
+## `main.py` — the CLI entry point (2026-07-27; extended 2026-07-29, 2026-08-01)
 
 ### Why this needed building specifically
 
@@ -804,6 +863,17 @@ The first CLI token is sniffed before argparse ever sees it: `"compare"` hands o
 
 `compare` requires `--dataset` — comparing across two different datasets would mix incomparable metrics into one file, which is never allowed (see "Cross-run comparison" above). If omitted or misspelled, it prints a warning and falls back to the same interactive picker `run` already uses, rather than a bare argparse error. Output is always named `comparison_<timestamp>_<dataset>.json`.
 
+### The `export` and `report` subcommands (2026-08-01)
+
+Two more subcommands, sniffed the same way as `compare`:
+
+```
+python main.py export --dataset climate
+python main.py report results/result_log_2026_07_27_223458_climate.json
+```
+
+`export` (CSV) requires `--dataset`, identical rule to `compare`. `report` (Markdown) takes a file path instead, auto-detecting a single-run vs. comparison file by name — see "Results reporting: CSV export and the Markdown viewer" above for the full design and the real bug this feature surfaced and fixed.
+
 ### Free-tier rate limit note (2026-07-29)
 
 Running sessions back-to-back can exceed the Gemini API's free-tier per-minute quota, surfacing as an uncaught `429 RESOURCE_EXHAUSTED` error partway through a run — and since this happens before the result is persisted, the run leaves no file behind at all (see "Cross-run comparison" → "Known limitation" above). `main.py` now prints a note about this at startup, alongside the existing "want to add a new dataset?" pointer.
@@ -833,23 +903,26 @@ Confirmed working end-to-end across both datasets: interactive dataset/target pr
 ├── README.md
 ├── SECURITY.md
 ├── TECHNICAL_NOTES.md
-├── main.py                 # ✅ CLI entry point (2026-07-27) — real public replacement for run_smoke_test.py's role; 'compare' subcommand + rate-limit note added (2026-07-29)
+├── main.py                 # ✅ CLI entry point (2026-07-27) — real public replacement for run_smoke_test.py's role; 'compare' subcommand + rate-limit note (2026-07-29); 'export'/'report' subcommands (2026-08-01)
 ├── ml_agent/
 │   ├── __init__.py
-│   ├── agent.py             # ✅ orchestration loop wired end-to-end (2026-07-17); log_iterations threaded through (2026-07-19); random_state now also bound into Trainer.train_model (2026-07-29)
-│   ├── compare_runs.py      # ✅ turns several results/result_log_*.json runs (one dataset at a time) into one comparison_<timestamp>_<dataset>.json
+│   ├── agent.py             # ✅ orchestration loop wired end-to-end (2026-07-17); log_iterations threaded through (2026-07-19); random_state now also bound into Trainer.train_model (2026-07-29); stale TOOL_FUNCTIONS docstring note corrected (2026-08-01)
+│   ├── compare_runs.py      # ✅ turns several results/result_log_*.json runs (one dataset at a time) into one comparison_<timestamp>_<dataset>.json; final-model resolution fixed + final_model_ambiguous flag added, standalone entry point now dataset-required (2026-08-01)
 │   ├── dataset.py           # ✅ done — dataset-agnostic loading + inspection
 │   ├── gemini_client.py     # ✅ done — Gemini client + function-call dispatch loop, verified; per-iteration logging + format_log (2026-07-19); MAX_ITERATIONS raised 10→15 (2026-07-27)
+│   ├── reporting.py          # ✅ NEW (2026-08-01) — CSV export (to_csv) + Markdown viewer (to_markdown), auto-detecting result_log_*/comparison_* by filename
 │   ├── tools.py              # ✅ done — Gemini function-calling tool schemas + TOOL_FUNCTIONS; max_iter hyperparameter added (2026-07-27)
 │   └── trainer.py            # ✅ done — storage, validation, real sklearn fit/predict/evaluate; fit-time warning capture (2026-07-24); random_state threaded into every estimator for reproducibility (2026-07-29)
-├── pyproject.toml
+├── pyproject.toml            # testpaths = ["tests"] added (2026-08-01) — see "Testing" below for why
 ├── rename_results.py         # one-time migration script (2026-07-29), gitignored — not project code; renamed pre-existing results/ files to the result_log_*_<dataset>.json convention
-├── results/                   # gitignored; one result_log_<timestamp>_<dataset_name>.json per run (2026-07-29 naming; was smoke_test_log_<timestamp>.json), plus comparison_<timestamp>_<dataset>.json output from compare_runs.py
+├── results/                   # gitignored; one result_log_<timestamp>_<dataset_name>.json per run, plus comparison_<timestamp>_<dataset>.json (compare_runs.py) and export_<timestamp>_<dataset>.csv / *.md (reporting.py, 2026-08-01)
 ├── run_smoke_test.py         # manual live-API smoke test of run_session(); gitignored; superseded by main.py as the real entry point, kept for quick manual debugging
 ├── smoke_test.py              # isolated schema-construction check, no API key/network; gitignored
 ├── tests/
 │   ├── __init__.py
+│   ├── test_compare_runs.py  # ✅ NEW (2026-08-01), 5 passing tests — locks in the final-model resolution fix
 │   ├── test_dataset.py       # ✅ done, 9 passing tests
+│   ├── test_reporting.py     # ✅ NEW (2026-08-01), 9 passing tests — auto-detect, CSV/Markdown rendering
 │   ├── test_tools.py         # ✅ done, 12 passing tests (2026-07-15; extended 2026-07-19) — reviewed, resolved (2026-07-27), no changes needed
 │   └── test_trainer.py       # not yet started
 └── uv.lock
@@ -925,10 +998,17 @@ To compare several already-completed runs sitting in `results/` (one dataset at 
 uv run python main.py compare --dataset climate
 ```
 
-The standalone module invocation still works too, scanning everything unfiltered by default:
+The standalone module invocation now requires a dataset too (resolved 2026-08-01 — see "Cross-run comparison" above):
 
 ```bash
-uv run python -m ml_agent.compare_runs
+uv run python -m ml_agent.compare_runs climate
+```
+
+To export several runs as a spreadsheet, or render a single run or comparison file as a human-readable Markdown report (see "Results reporting" above):
+
+```bash
+uv run python main.py export --dataset climate
+uv run python main.py report results/result_log_2026_07_27_223458_climate.json
 ```
 
 ## Testing
@@ -937,7 +1017,9 @@ uv run python -m ml_agent.compare_runs
 uv run pytest -v
 ```
 
-Network-dependent behavior (the Climate Crashes OpenML fetch) is not exercised directly in tests — it's mocked. Currently **21 tests passing**: 9 in `test_dataset.py`, 12 in `test_tools.py` (added 2026-07-15, extended 2026-07-19; reviewed and resolved 2026-07-27 against `trainer.py`'s `warnings` key and `tools.py`'s `max_iter` addition — no changes needed).
+Network-dependent behavior (the Climate Crashes OpenML fetch) is not exercised directly in tests — it's mocked. Currently **35 tests passing**: 9 in `test_dataset.py`, 12 in `test_tools.py` (added 2026-07-15, extended 2026-07-19; reviewed and resolved 2026-07-27 against `trainer.py`'s `warnings` key and `tools.py`'s `max_iter` addition — no changes needed), 5 in `test_compare_runs.py` and 9 in `test_reporting.py` (both new 2026-08-01 — see "Results reporting" above).
+
+**`pyproject.toml`'s `testpaths` setting (2026-08-01):** without it, pytest's default file-discovery glob (`test_*.py` **or** `*_test.py`) also matches `run_smoke_test.py`, importing and — since its body is unguarded top-level code — actually *executing* it during test collection: a real Gemini API call and a real `results/smoke_test_log_*.json` write, on every `pytest` run, silently. Reproduced three times before being traced to this cause. `testpaths = ["tests"]` restricts collection to the `tests/` directory only. See `TECHNICAL_NOTES.md` Part 7, §7.6 for the full root-cause writeup, including its likely (newly discovered, not previously suspected) contribution to the free-tier rate-limit errors documented elsewhere in this README.
 
 ---
 
@@ -964,14 +1046,18 @@ Project 5 of a 10-step learning roadmap: Linux → Git → Professional Python �
 9. **As of 2026-07-27:** `test_tools.py` reviewed and resolved (no changes needed — see its section above); the `ConvergenceWarning` shortlist narrowed to a decision and built (`max_iter` exposed, verified against 3 live runs — see "Closing the `ConvergenceWarning` shortlist" above); `main.py` built as the real public CLI entry point, chosen over the results viewer as this session's priority specifically because `run_smoke_test.py` being gitignored meant no committed entry point existed at all; and `MAX_ITERATIONS` raised from 10 to 15, closing a 07-12 open decision once real live-run evidence met its stated condition.
 10. **As of 2026-07-29 (current):** the `max_iter`-vs-`C` confound (item 9's carried-forward follow-up) resolved via a real controlled run — `C`, not `max_iter`, confirmed as the driver of the recall improvement, and a metric-terminology correction made in the same write-up (see "Closing the `ConvergenceWarning` shortlist" above). Results-file naming renamed and dataset-scoped (`result_log_<timestamp>_<dataset_name>.json`, `compare_runs.py`'s `build_comparison` now filters by dataset), closing a 2026-07-27 open item, with a one-time migration script for pre-existing files. `main.py` gained a `compare` subcommand (dataset-required, sharing one entry point with `run`) and a free-tier rate-limit note, after reproducing a real `429 RESOURCE_EXHAUSTED` crash from running sessions back-to-back. A genuine reproducibility bug was found and fixed: `RandomForestClassifier` had no `random_state` at all, so identical hyperparameters could produce different results across separate runs — `random_state` is now threaded through every estimator, reusing the same seed already used for the train/test split (see "Reproducibility: seeding every estimator" above).
 
+    **Carried forward from 2026-07-29 into this session, both now resolved:** the human-friendly results viewer and the CSV/spreadsheet export — see item 11 below.
+
+11. **As of 2026-08-01 (current):** both remaining named blockers to making the repo public are now built. `ml_agent/reporting.py` (CSV export + Markdown viewer, sharing one data-prep path built on `compare_runs.py`'s `summarize_run()`) and two new `main.py` subcommands, `export` and `report`, mirroring `compare`'s pattern. Building this surfaced and fixed a real bug: `summarize_run`'s "last evaluated model = final model" heuristic was confirmed wrong on a real file — final model is now resolved by best score on the run's own optimization target, with a new `final_model_ambiguous` flag surfacing any disagreement rather than silently picking one. Also resolved this session: the 2026-07-29 open question on whether the standalone `python -m ml_agent.compare_runs` entry point should require a dataset (it now does, matching `main.py`), and a stale docstring/TODO note about an already-existing `test_tools.py` safeguard (added 2026-07-17, not "not yet built" as both had claimed). A separate, unrelated bug was also found via manual testing and fixed: `pyproject.toml` had no `testpaths` setting, so pytest was silently importing and executing `run_smoke_test.py` (a real API call) on every test run — see "Testing" above. Two new test files (`test_compare_runs.py`, `test_reporting.py`) bring the suite to 35 passing tests.
+
     **Carried forward, full running list, for the next session:**
-    - The human-friendly results viewer (item 4 from 2026-07-24; design agreed, not built) — the next planned priority.
     - Timestamp-format inconsistency, `run_smoke_test.py` (local) vs. `compare_runs.py` (UTC) — low priority, unfixed.
-    - CSV/spreadsheet export — the explicitly named gate before making the repo public.
-    - `Agent-decisions.md` generator — a post-hoc, human-readable report of `record_model_proposal`/`record_convergence_decision` reasoning per run, written incrementally (open-at-start, append-per-iteration) as partial mitigation for the invisible-failed-run limitation (real crash reproduced 2026-07-29, still an accepted limitation — see "Cross-run comparison" above). Architecture agreed: an injected callback into `run_agent_loop` (mirroring the still-deferred human-in-the-loop hook's shape), not yet built — to be designed together with that hook, since both need the same injection point in the same loop.
+    - `Agent-decisions.md` generator — a post-hoc, human-readable report of `record_model_proposal`/`record_convergence_decision` reasoning per run, written incrementally (open-at-start, append-per-iteration) as partial mitigation for the invisible-failed-run limitation (real crash reproduced 2026-07-29, still an accepted limitation — see "Cross-run comparison" above). Architecture agreed: an injected callback into `run_agent_loop` (mirroring the still-deferred human-in-the-loop hook's shape), not yet built — to be designed together with that hook, since both need the same injection point in the same loop. **A second idea now folded into this same future conversation (2026-08-01):** using a live Gemini call to adjudicate a run flagged `final_model_ambiguous` — see "Results reporting" above.
     - **A "register/list datasets from the terminal" feature (expanded 2026-07-29, merging in a 2026-07-24 idea raised in the same spirit):** `dataset list` / `dataset upload` subcommands, mirroring `compare`'s pattern — `list` shows the current `DATASET_LOADERS` registry, `upload` lets a user register a new dataset without hand-editing `dataset.py`. Not scoped in detail; only worth building once a third dataset is realistically on the horizon.
-    - **A second, optional `--model-random-state` flag (new, 2026-07-29), low priority:** would default to match `--random-state`, restoring the ability to isolate split-variance from model-internal-variance as an opt-in advanced knob — considered and deliberately deferred in favor of the simpler single-seed design actually built this session (see "Reproducibility" above for the full trade-off).
-    - A further extension to the `C`-vs-`max_iter` isolation finding (new, 2026-07-29), low priority: sweeping `C` across several values with `max_iter` held constant, to characterize the shape of the relationship rather than just confirm its direction — nice-to-have for the portfolio angle, not blocking anything.
+    - **A second, optional `--model-random-state` flag (2026-07-29), low priority:** would default to match `--random-state`, restoring the ability to isolate split-variance from model-internal-variance as an opt-in advanced knob — considered and deliberately deferred in favor of the simpler single-seed design actually built (see "Reproducibility" above for the full trade-off).
+    - A further extension to the `C`-vs-`max_iter` isolation finding (2026-07-29), low priority: sweeping `C` across several values with `max_iter` held constant, to characterize the shape of the relationship rather than just confirm its direction — nice-to-have for the portfolio angle, not blocking anything.
+    - **NEW (2026-08-01), low priority:** `main.py`'s `export`/`report` CLI wiring (argument parsing, interactive-prompt fallback, file-write side effects) has no automated test coverage yet — only the `reporting.py`/`compare_runs.py` logic it calls does. Would need `tmp_path`, `pytest-mock`'s `mocker`, and `capsys`.
+    - **NEW (2026-08-01), housekeeping:** the pre-2026-07-29 `result_log_*.json` files (no `config` block, fall back to the old last-evaluated heuristic, show `?` for dataset/target in reports) are planned for eventual deletion once no longer needed for reference — not done this session.
     - The human-in-the-loop hook itself, and the two original 07-13 `run_agent_loop` judgment calls (single-call-per-turn; convergence result not echoed on stop) — all still untouched, still deliberately deferred.
 
 ---
@@ -1021,3 +1107,11 @@ A related terminology correction, worth stating plainly rather than quietly fixi
 The results-file naming change (`smoke_test_log_<timestamp>.json` → `result_log_<timestamp>_<dataset_name>.json`) surfaced a design fork worth documenting: placing `dataset_name` *before* the timestamp (`result_log_<dataset_name>_<timestamp>.json`) was the initially-proposed convention, but would have broken `compare_runs.py`'s existing assumption that a whole-filename string sort produces chronological order — all of one dataset's runs would sort before all of another's, regardless of when they actually ran. Checking a downstream consumer's assumptions before finalizing an upstream naming change caught this before it shipped, rather than after.
 
 Also worth recording: a subcommand design (`main.py compare`, alongside the existing default `run` behavior) was chosen over requiring an explicit `run` subcommand for the existing default path, specifically because there were no existing users of the CLI besides this project's own author at the time of the change — retraining muscle memory for a convention with zero present benefit was judged the wrong trade-off for a not-yet-public project, though worth revisiting if the project goes public later and a stranger's first interaction is `--help`.
+
+### Results reporting and two real bugs found (2026-08-01 session)
+
+Building `reporting.py` surfaced a genuine bug rather than just a missing feature: a heuristic ("last evaluated model in a run's log = the final model") that had sat undisturbed since 2026-07-24, explicitly flagged in its own docstring as "not observed in any real run yet," turned out to be wrong the first time a real file actually exercised the case it warned about. The lesson generalizes beyond this specific bug: a documented-but-unverified assumption is a liability that accumulates silently until something forces it to be checked — in this case, extending `summarize_run()` for an unrelated reason (surfacing hyperparameters) was what happened to surface it. Full technical writeup, including the exact real numbers involved, is in `TECHNICAL_NOTES.md` Part 7, §7.1–7.2.
+
+A second, unrelated bug was found the same way — not by design review, but by a person noticing something that shouldn't have been happening (an unexplained file appearing after running `pytest`) and pushing to actually trace it rather than dismiss it as unrelated. The root cause — pytest's default collection glob silently importing and executing an unguarded top-level script — was several layers removed from the symptom, and easy to have written off as coincidental timing. See `TECHNICAL_NOTES.md` Part 7, §7.6 for the full trace.
+
+A smaller, purely process-level finding worth naming directly: a mitigation described in `agent.py`'s own docstring as "not built this session" (2026-07-19) had, in fact, already been built — two sessions later, in a commit that never updated the docstring or the running TODO list to say so. Neither the code nor the fix was wrong; the *documentation about the code* had simply drifted from reality without anything catching it until a `git log` review this session did. Worth deliberately checking a project's actual current state (via `git log`, `grep`, or the test suite itself) before trusting a docstring or TODO's claim that something "isn't built yet" — the claim itself can be the stale part, not the thing it's describing.
