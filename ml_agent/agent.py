@@ -173,14 +173,19 @@ def build_dispatch_table(
     # list_available_models and both Category B tools need no binding at
     # all, so TOOL_FUNCTIONS' versions of those three are used as-is.
     #
-    # RISK, flagged for the session summary/context/README: if
+    # RISK, originally flagged for the session summary/context/README: if
     # train_model or evaluate_model are ever renamed in tools.py, these
     # two override lines would silently stop overriding anything -- the
     # stale, NotImplementedError-raising version from TOOL_FUNCTIONS
     # would quietly take their place instead, undetected until a real
-    # run hit it. MITIGATION (not built this session): extend
-    # test_tools.py's drift-check philosophy with an assertion that
-    # these two override keys still exist in TOOL_FUNCTIONS.
+    # run hit it. MITIGATED: test_tools.py's
+    # test_dispatch_table_override_keys_exist() guards exactly this --
+    # asserts "train_model" and "evaluate_model" still exist as keys in
+    # TOOL_FUNCTIONS, so a rename in tools.py now surfaces as a failing
+    # test instead of silently at the next live run. (Confirmed present
+    # as of the 2026-08-01 session -- the exact session it was
+    # originally added in went untracked, which is why this docstring
+    # and the TODO list had both gone stale on this point.)
     dispatch_table = {
         **TOOL_FUNCTIONS,
         "train_model": bound_train,
