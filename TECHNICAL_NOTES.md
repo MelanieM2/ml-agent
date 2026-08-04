@@ -1267,3 +1267,105 @@ Five commits, `ed0826d` (07-30 session's final commit) as the base:
 5. `agent.py` — the docstring correction (§7.8)
 
 Verified clean before push: `git status` showed a clean working tree, 5 commits ahead of `origin/main`/`acer/main`, with `git log --oneline` confirming the base commit matched exactly what both Melanie and Claude had independently verified at session start.
+
+---
+
+## Part 8: `tests/test_trainer.py` — reproducibility test coverage, and an empirical debugging chain (2026-08-03 session)
+
+_Status: complete. 17/17 passing, confirmed by Melanie running the suite directly, not asserted from Claude's side._
+
+### 8.1 Why this file existed as an open item, and what closing it required
+
+`Trainer` (`trainer.py`) had real implementation and two real, previously-undiscovered bugs already fixed against it (fit-time warning capture, §6.x; `random_state` threading, §6.6) — but zero automated test coverage of its own, unlike `compare_runs.py` and `reporting.py` (§7.7). Closing this required deciding three independent design questions before writing a single test, each treated as a genuine fork rather than picked silently:
+
+**Fork A — real sklearn fits, or mocked `ESTIMATOR_REGISTRY` entries?** Decided: real fits. The `random_state` bug this file exists to guard against (§6.6) was specifically about an estimator's *actual numeric behavior* — `RandomForestClassifier` silently pulling from numpy's global RNG. A mock would confirm `Trainer.train_model` *calls* `estimator_class(**hyperparameters, random_state=random_state)` with the right arguments, but couldn't distinguish "the estimator was actually seeded" from "the estimator merely received an argument named `random_state`." Only a real `.fit()` call, run twice and diffed, can expose that difference.
+
+**Fork B — a project-wide `conftest.py`, or a file-local fixture?** Decided: file-local. `test_compare_runs.py` and `test_reporting.py` work off hand-built log dicts, not real `X`/`y` data (§7.7); `test_tools.py` tests schema/signature drift, not fitting. Nothing else in `tests/` currently needs the same synthetic dataset this file needs, so a shared `conftest.py` was judged structure without payoff for now — deferred until a second file actually wants the same fixture.
+
+**Fork C — one estimator type, or all three registered ones?** Decided: parametrize across all three (`LogisticRegression`, `RandomForestClassifier`, `SVC`). `ESTIMATOR_REGISTRY`'s entire design purpose (§?, `trainer.py`'s own docstring) is that adding a new `model_type` needs one new dict entry, not new `if/elif` dispatch logic — but that same genericity means a future `random_state`-threading regression on *any* one estimator would be exactly as silent as the original bug unless the test itself is swept across the full registry, not just the entry that happened to break first.
+
+### 8.2 What the 17 tests check
+
+- **Reproducibility, the core regression guard, parametrized across all three estimators:** (a) `random_state` reaches the fitted estimator's actual constructor — checked by reaching directly into `trainer._models[ref]["model"].random_state`, a deliberate, narrow exception to treating `Trainer` as a black box, justified because this exact attribute is what the original bug was about; (b) identical `model_type` + `hyperparameters` + `random_state`, fit twice, produce identical `confusion_matrix` output end to end — the single test that would have caught the original bug directly, had it existed before `baec981`.
+- `random_state` confirmed **not** Gemini-tunable: passing it inside `hyperparameters` (as if schema-defined) is rejected by `validate_hyperparameters` as an unknown key, against a self-contained fake schema (not importing the real `tools.py` schema, to keep this test's dependencies minimal) shaped to mirror the real one's field structure.
+- `train_model`'s return shape: `model_ref` and `warnings` both always present, `warnings` always a list (mirrors the consistent-key-set convention already used by `gemini_client.py`'s per-iteration log and `final_model_ambiguous`).
+- Fit-time `ConvergenceWarning` capture — see §8.3, the one that took three attempts.
+- `evaluate_model`: confusion-matrix orientation independently re-derived via plain pandas boolean counting (not by re-calling sklearn's own `confusion_matrix`, which would just restate the code under test) for both `pos_label=0` and `pos_label=1`; unknown `model_ref` raises `ValueError`; output is confirmed genuinely JSON-serializable via an actual `json.dumps()` call, not just visual inspection of the return type.
+- `validate_hyperparameters`: unknown `model_type`, unknown hyperparameter key, out-of-range float, invalid choice — all against a fake schema whose numeric ranges were checked against the real `tools.py` schema (uploaded and confirmed by Melanie) rather than invented.
+
+### 8.3 The `ConvergenceWarning` test: three attempts, the two that failed and why, and the one that was verified before shipping
+
+**The constraint that shaped this:** `tools.py`'s real schema (`list_available_models()`) fixes `logistic_regression.max_iter`'s valid range at `[50, 1000]`. A first draft of this test used `max_iter=1` to trivially force non-convergence — invalid the moment it was checked against the real schema, since `1 < 50` would raise `ValueError` from `validate_hyperparameters` before the fit call ever ran. The corrected constraint: `max_iter=50` (the schema's floor) and `C=100.0` (the schema's ceiling — weakest allowed regularization, giving `lbfgs` the least help staying bounded), with the *dataset itself* needing to be genuinely hard to converge within that fixed 50-iteration budget.
+
+**Attempt 1 — uniform feature scaling.**
+
+```python
+X = X * 1e5   # every feature scaled by the same factor
+```
+
+Reasoning at the time: poorly-scaled features are a well-known real cause of slow `lbfgs` convergence. **Shipped to Melanie without being run first — a real process gap.** Result on her machine: 16/17 passed, this one failed (`assert 'ConvergenceWarning' in []`, i.e. no warning fired at all).
+
+**Diagnosis:** multiplying every feature by the *same* factor doesn't change the *relative* conditioning between features at all — `lbfgs`'s internal quasi-Newton curvature (Hessian) approximation cares about how features' scales compare to *each other*, not their absolute magnitude. A uniformly-scaled problem is, from the solver's perspective, nearly the same problem it started with.
+
+**Attempt 2 — near-perfect linear separability.**
+
+```python
+X, y = make_classification(..., class_sep=50.0, flip_y=0.0, ...)
+# combined with C=100.0 in the test itself
+```
+
+Reasoning: when classes are (almost) perfectly linearly separable, the true maximum-likelihood coefficients diverge toward infinity rather than converging to any finite value — a real, textbook cause of logistic-regression non-convergence, and a genuinely different mechanism than Attempt 1's scaling issue. **Also shipped without being run first.** Result on Melanie's machine: failed again, same assertion.
+
+**Diagnosis — found this time via direct experimentation in Claude's own sandboxed Python environment, before writing a third guess:**
+
+```python
+for C in [1.0, 100.0]:
+    clf = LogisticRegression(C=C, max_iter=50, class_weight="balanced", random_state=1)
+    ...
+    print(name, "C=", C, "warnings:", cats, "n_iter:", clf.n_iter_)
+# orig class_sep=50   C=1.0    warnings: []   n_iter: [9]
+# orig class_sep=50   C=100.0  warnings: []   n_iter: [5]
+```
+
+`lbfgs`'s stopping rule checks *gradient norm* against a tolerance (`tol`, default `1e-4`), not distance from some theoretical optimum. Under near-perfect separability, gradient norm can shrink below that tolerance quickly even while the coefficients are still growing toward an optimum that technically doesn't exist — so in practice, on a small (30-sample, low-dimensional) synthetic dataset, `lbfgs` satisfies its own convergence criterion in single digits of iterations regardless of how separable the classes are. The theory (unbounded coefficients under perfect separability) was correct; its practical relevance to a 50-iteration budget was not.
+
+**Attempt 3 — mismatched per-feature scales, empirically searched and verified before shipping.**
+
+Several configurations were tried directly in Claude's sandbox before settling on one:
+
+```python
+scales = np.array([1e-3, 1e3, 1e-4, 1e4, 1e-2, 1e2, 1e-5, 1e5, 1, 1e6])
+X_illcond = X * scales   # each feature scaled DIFFERENTLY, not uniformly
+# ill-conditioned mixed scales, 10 feat: warnings=['ConvergenceWarning'], n_iter=[50]
+```
+
+This reliably hit the `n_iter_=50` ceiling with `ConvergenceWarning` firing. **Verified for robustness before being shipped this time** — 5 different data-generation seeds × 2 different training `random_state` values, 10/10 triggering the warning:
+
+```
+data_seed=1 train_seed=1:  warnings=['ConvergenceWarning'], n_iter=[50]
+data_seed=1 train_seed=42: warnings=['ConvergenceWarning'], n_iter=[50]
+data_seed=2 train_seed=1:  warnings=['ConvergenceWarning'], n_iter=[50]
+... (10/10 across all combinations)
+```
+
+Melanie ran the corrected version: **17/17 passing.**
+
+**The actual mechanism, and why it's genuinely different from Attempt 1:** it's not feature scale itself that matters, it's the *mismatch* between features' scales on the same problem. `lbfgs`'s quasi-Newton curvature approximation assumes roughly comparable scales across dimensions to build a useful estimate of the objective's local curvature; wildly different per-feature scales distort that estimate directly, slowing convergence in a way uniform scaling structurally cannot. This is also, not incidentally, the standard real-world justification for standardizing features before fitting linear models — this test's fixture is a working demonstration of that justification, not just an artificial way to force a warning.
+
+**Process lesson, worth stating for its own sake:** Attempts 1 and 2 were both individually reasonable applications of real optimization theory, and both were shipped as untested guesses rather than verified first — a real gap in following "verification over assertion" consistently, caught only because Melanie was actually running the code and reporting back honestly rather than assuming success. Attempt 3 was found and confirmed *before* being handed over, using the same sandboxed execution capability that could have caught Attempts 1 and 2's flaws earlier. Standing practice going forward (see the 2026-08-03 extension to "Verification Over Assertion" in the context file): when a numerical/technical claim can actually be checked by running code, check it before proposing it, not after it fails on someone else's machine.
+
+### 8.4 `numpy` added as a dev dependency
+
+Needed only by §8.3's ill-conditioned-data fixture (the `scales` array). Never imported inside `ml_agent/` itself — added via `uv add --group dev numpy`, landing in `pyproject.toml`'s `dev` group alongside `pytest`/`pytest-mock`, pinned exact (`numpy==2.5.0`) per this project's existing `add-bounds = "exact"` convention. Confirmed correctly placed by Melanie pasting the resulting `[dependency-groups]` block.
+
+### 8.5 A secondary, smaller correction: `testpaths` vs. an explicit path argument
+
+While running the corrected test file, Melanie tried `uv run pytest test_trainer.py -v` (dropping the `tests/` directory prefix, not omitting the path argument entirely) — this failed with `file or directory not found`, since no such path exists at the repo root. Claude had previously stated that `tests/` in `uv run pytest tests/test_trainer.py -v` was "redundant," reasoning from `pyproject.toml`'s `testpaths = ["tests"]` setting (§7.6). That reasoning was imprecise: `testpaths` only applies when pytest receives **no path argument at all**; any explicit path argument, including one missing a directory prefix, is resolved as a literal filesystem path and bypasses `testpaths` entirely. `uv run pytest -v` (no path) and `uv run pytest tests/ -v` (explicit, matching what `testpaths` would resolve to anyway) both work; a bare filename that doesn't exist at the invocation directory does not.
+
+### 8.6 Git commit, this session
+
+One commit, on top of `190f8dc` (the 2026-08-01 session's final commit):
+
+1. `tests/test_trainer.py` (new) — all of §8.1–§8.3 above, 17 tests.
+
+A second commit added `numpy` to `pyproject.toml`/`uv.lock` (§8.4). A third added `DATA_SCIENCE_ANALYSIS.md` §13 (the data-science-layer writeup of the `final_model_ambiguous` finding from §7.1–§7.2 above — cross-referenced from there, not duplicated here). All three confirmed pushed to `origin`/`acer` by Melanie before this Part 8 was written.
