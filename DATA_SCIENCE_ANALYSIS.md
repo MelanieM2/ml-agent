@@ -18,6 +18,8 @@ _Updated 2026-07-27 — see §11: `max_iter` exposed as a tunable hyperparameter
 
 _Updated 2026-07-29 — see §12: the `max_iter`-vs-`C` confound isolated and resolved, §11.7's flagged Random Forest anomaly explained (a real reproducibility bug, not a curiosity), and new Breast Cancer results across all three model types_
 
+_Updated 2026-08-01 — see §13: summarize run's final- model resolution corrected — a real breast cancer run's reported outcome was wrong_
+
 ---
 
 ## 1. The dataset asymmetry this analysis depends on
@@ -667,6 +669,53 @@ The linear-kernel SVM result (Run 1) is a genuinely new data point for this proj
 | Is §11.7's Random Forest "bit-identical results" observation evidence of hidden determinism? | No — resolved as a real reproducibility bug (`random_state` never set), confirmed directly against `trainer.py`'s code and fixed this session. |
 | Are pre-2026-07-29 Random Forest figures in this document still reliable as records of what happened? | Yes, as historical records of those specific runs. Not necessarily reproducible if re-run today under the old code — a narrow methodological caveat, not a retraction. |
 | Has a new best recall been reached on Breast Cancer? | Yes, on this small sample — 0.9861 (linear-kernel SVM), the first live use of that kernel on this dataset. n=1, not yet a confirmed pattern. |
+
+---
+
+<!--
+DATA_SCIENCE_ANALYSIS.md update — 2026-08-01 session
+-->
+
+## 13. Update, 2026-08-01: `summarize_run`'s final-model resolution corrected — a real breast_cancer run's reported outcome was wrong
+
+### 13.1 What was assumed, and why it was wrong
+
+`compare_runs.py`'s `summarize_run()` resolved a run's "final model" by taking whichever `evaluate_model` call appeared *last* in the log — reasonable in most runs, since the agent typically evaluates a model and either accepts it or proposes another. The assumption breaks whenever the agent evaluates a model purely as a *comparison point* after already having, in its own reasoning, effectively decided — exactly what real run `result_log_2026_07_29_232959_breast_cancer.json` (`optimization_target="recall"`) did.
+
+### 13.2 The real run
+
+Three `evaluate_model` calls, in log order:
+
+| Order | Model | Hyperparameters | Recall |
+|---|---|---|---|
+| 1 | Logistic Regression | `class_weight="balanced"` | 0.9583 |
+| 2 | Logistic Regression | `class_weight="balanced", max_iter=500` | **0.9722** |
+| 3 | Random Forest | `n_estimators=200, max_depth=10, class_weight="balanced"` | 0.9583 |
+
+The agent's own `record_convergence_decision` reasoning: *"The max_iter=500 logistic regression is best."* — naming the **second** evaluation, not the third (last) one. Under the old heuristic, this run's reported final model would have been the Random Forest step (recall 0.9583) — evaluated purely as a comparison point after the agent had already settled on the earlier result. Every downstream consumer of `summarize_run()`'s output (`main.py export`'s CSV rows, `main.py report`'s narrative) would have silently reported the wrong model as this run's actual outcome.
+
+Implementation detail (the code fix itself, and the new test coverage guarding it) is a design/architecture concern, not a data-science one, per this project's own documentation split — see `TECHNICAL_NOTES.md` Part 7, §7.1–§7.2 for that side.
+
+### 13.3 The fix, and what it changes about how to read this document
+
+Fixed by resolving "final model" by best score on the run's own `optimization_target` rather than call order, with a new `final_model_ambiguous` flag (`True`/`False`/`None`) surfacing any disagreement so a future case like this stays visible rather than silently trusted either way (`None` covers older files with no recorded `config.target` at all — nothing to compare against, not "resolved cleanly").
+
+**A narrow caveat on this document's own reporting practice:** figures sourced from `main.py export`/`report`'s automated output, generated before 2026-08-01, are potentially subject to this bug. The mechanism affected specifically the automated `summarize_run()` path — §2's table, for instance, predates `compare_runs.py`'s existence entirely (written 2026-07-13/17, direct log reading), so it isn't structurally exposed to this bug.
+
+**§12.4's Run 2 entry, checked against this bug — inference, not confirmed fact:** §12.4's Run 2 (model sequence and 0.9722 recall) matches this exact run closely enough to very likely be the same one. Two things point toward that entry being unaffected by the bug, though neither is a hard confirmation: (1) `main.py export`/`report` — the CLI surface that would have exposed `summarize_run()`'s buggy output to a human — did not exist until 2026-08-01, after §12.4 was written on 2026-07-29; (2) §12.4 reports 0.9722 (the second, "actually chosen" evaluation), not 0.9583 (the third/last evaluation, which is what the old buggy heuristic would have returned). Checked against `Detailed_Session_Summary_2026-07-30.md`: it independently confirms §12.4's Run 1 figure (0.9861, linear-kernel SVM) as a real, correctly-reported result, but does not state how Run 2's figure was specifically produced. Working assumption, per Melanie's direction: §12.4's existing figures were compiled by direct reading of the raw log and the agent's reasoning text, not via the buggy automated path, and do not need retroactive correction — flagged here as an assumption, not a settled fact, should it ever need revisiting.
+
+### 13.4 Deferred: what happens when the flag actually fires
+
+Resolving `final_model_ambiguous=True` currently means a human reads the flag and checks the run's reasoning manually — no automated adjudication step exists yet. Folded into the still-open human-in-the-loop design conversation (items #6/#12), including the idea of asking Gemini to adjudicate a flagged mismatch via a second live call.
+
+### 13.5 Summary table
+
+| Question | Answer, with appropriate caveats |
+|---|---|
+| Was "last evaluated = final model" ever actually correct as a general assumption? | No — disproven directly by one real run, where the agent's own stated reasoning named an earlier evaluation as chosen. n=1 confirmed case, not yet surveyed across every historical run file. |
+| Is this a data-science finding or a tooling bug? | Both — the cause is a summarization bug (code fix in `TECHNICAL_NOTES.md`), but its effect was a documented run's outcome being misreported, which is about trusting what this document says happened. |
+| Does the fix resolve every future case automatically? | No — flags a disagreement for a human to check; automated adjudication is explicitly deferred. |
+| Are any of this document's own earlier figures affected? | §12.4's Run 2 is very likely unaffected — inference from CLI-availability timing and the reported number itself, not a confirmed fact; working assumption per Melanie's direction. No other figures in this document are structurally exposed to this bug (see §13.3). |
 
 ---
 
