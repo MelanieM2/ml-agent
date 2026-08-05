@@ -1,5 +1,159 @@
 # Data Science Analysis: Agent Convergence Behavior Across Datasets
 
+_Companion to [`TECHNICAL_NOTES.md`](./TECHNICAL_NOTES.md) — this file covers methodology and findings; that one covers implementation decisions. Most working sessions touched both, on the same date, about the same piece of work — see the session map below._
+
+---
+
+## Session map: how this file lines up with `TECHNICAL_NOTES.md`
+
+```
+TECHNICAL_NOTES.md                                 DATA_SCIENCE_ANALYSIS.md (this file)
+──────────────────────────────────────────────────────────────────────────
+Part 1   2026-07-13  eval & deferred, not built    ·   (no DS counterpart)
+Part 2   2026-07-17  orchestration-loop wiring     ──▶ §8   optimization-target fix, tested live
+Part 3   2026-07-19  per-iteration logging         ──▶ §9   first look inside a run
+Part 4   2026-07-24  warning capture + compare     ──▶ §10  cross-run comparison goes live
+Part 5   2026-07-27  max_iter exposed              ──▶ §11  max_iter tested against 3 live runs
+Part 6   2026-07-29  reproducibility fix            ──▶ §12  max_iter-vs-C confound resolved
+Part 7   2026-08-01  reporting.py, final-model fix  ──▶ §13  final-model resolution corrected
+Part 8   2026-08-03  test_trainer.py, 17 tests     ─ ─ ▶ §13  (cross-reference only, no new run)
+```
+
+---
+
+## Status index
+
+| § | Date | Covers | Status | See also |
+|---|---|---|---|---|
+| [1](#1-the-dataset-asymmetry-this-analysis-depends-on) | — | Dataset asymmetry (Climate Crashes vs. Breast Cancer) this analysis depends on | Foundational framing | — |
+| [2](#2-full-run-results) | — | Full run results | — | — |
+| [3](#3-finding-convergence-speed-and-consistency-track-dataset-difficulty) | — | Convergence speed/consistency tracks dataset difficulty | Finding | — |
+| [4](#4-finding-the-missing-optimization-target-is-a-real-observed-problem--not-just-a-theoretical-gap) | — | Missing optimization target is a real, observed problem | Finding — fixed & verified in §8 | [TN Part 2](./TECHNICAL_NOTES.md#part-2-orchestration-loop-wiring--implementation-details-2026-07-17) |
+| [5](#5-finding-non-determinism-is-real-but-may-be-partly-a-budget-artifact-not-pure-randomness) | — | Non-determinism, partly a budget artifact | Finding | — |
+| [6](#6-secondary-finding-logisticregressions-convergence-warning-is-systematic-not-incidental) | — | `LogisticRegression` convergence warning is systematic | Finding — resolved in §11 | [TN Part 5](./TECHNICAL_NOTES.md#part-5-max_iter-exposed-as-a-hyperparameter-confirming-the-agent-reasoning-pathway-was-already-wired-2026-07-27) |
+| [7](#7-summary-as-of-2026-07-13) | 2026-07-13 | Summary as of this date | — | — |
+| [8](#8-update-2026-07-17-the-optimization-target-fix-tested-for-the-first-time-against-a-live-agent) | 2026-07-17 | Optimization-target fix, tested live | Verified | [TN Part 2](./TECHNICAL_NOTES.md#part-2-orchestration-loop-wiring--implementation-details-2026-07-17) |
+| [9](#9-update-2026-07-19-per-iteration-logging--first-look-inside-a-runs-actual-search-path) | 2026-07-19 | Per-iteration logging — first look inside a run | Verified | [TN Part 3](./TECHNICAL_NOTES.md#part-3-per-iteration-logging-in-run_agent_loop-2026-07-19) |
+| [10](#10-update-2026-07-24-cross-run-comparison-goes-live--the-8493-question-finally-has-real-data-behind-it) | 2026-07-24 | Cross-run comparison goes live | Verified | [TN Part 4](./TECHNICAL_NOTES.md#part-4-fit-time-warning-capture-corrected-run-persistence-and-cross-run-comparison-2026-07-24) |
+| [11](#11-update-2026-07-27-max_iter-exposed-as-a-tunable-hyperparameter--the-convergencewarning-shortlist-decision-tested-against-3-live-runs) | 2026-07-27 | `max_iter` exposed, tested against 3 live runs | Verified | [TN Part 5](./TECHNICAL_NOTES.md#part-5-max_iter-exposed-as-a-hyperparameter-confirming-the-agent-reasoning-pathway-was-already-wired-2026-07-27) |
+| [12](#12-update-2026-07-29-the-max_iter-vs-c-confound-resolved-117s-anomaly-explained-and-new-breast-cancer-results) | 2026-07-29 | `max_iter`-vs-`C` confound resolved; reproducibility bug found & fixed | Verified | [TN Part 6](./TECHNICAL_NOTES.md#part-6-results-file-renaming-compare-subcommand-and-the-reproducibility-fix-2026-07-29) |
+| [13](#13-update-2026-08-01-summarize_runs-final-model-resolution-corrected--a-real-breast_cancer-runs-reported-outcome-was-wrong) | 2026-08-01 | `summarize_run`'s final-model resolution corrected | Verified | [TN Part 7](./TECHNICAL_NOTES.md#part-7-results-reporting-reportingpy-a-real-final-model-bug-fix-and-a-pytest-collection-bug-2026-08-01), cross-ref [TN Part 8](./TECHNICAL_NOTES.md#part-8-teststest_trainerpy--reproducibility-test-coverage-and-an-empirical-debugging-chain-2026-08-03-session) |
+
+---
+
+## Table of contents
+
+- [1. The dataset asymmetry this analysis depends on](#1-the-dataset-asymmetry-this-analysis-depends-on)
+
+- [2. Full run results](#2-full-run-results)
+
+- [3. Finding: convergence speed and consistency track dataset difficulty](#3-finding-convergence-speed-and-consistency-track-dataset-difficulty)
+
+- [4. Finding: the missing optimization target is a real, observed problem — not just a theoretical gap](#4-finding-the-missing-optimization-target-is-a-real-observed-problem--not-just-a-theoretical-gap)
+
+- [5. Finding: non-determinism is real, but may be partly a budget artifact, not pure randomness](#5-finding-non-determinism-is-real-but-may-be-partly-a-budget-artifact-not-pure-randomness)
+
+- [6. Secondary finding: `LogisticRegression`'s convergence warning is systematic, not incidental](#6-secondary-finding-logisticregressions-convergence-warning-is-systematic-not-incidental)
+
+- [7. Summary (as of 2026-07-13)](#7-summary-as-of-2026-07-13)
+
+<!-- -->
+
+<details>
+<summary><a href="#8-update-2026-07-17-the-optimization-target-fix-tested-for-the-first-time-against-a-live-agent">8. Update, 2026-07-17: the optimization-target fix, tested for the first time against a live agent</a></summary>
+
+- [8.1 Results](#81-results)
+- [8.2 Finding: the fix worked, directly and repeatably — a genuine before/after contrast with §4](#82-finding-the-fix-worked-directly-and-repeatably--a-genuine-beforeafter-contrast-with-4)
+- [8.3 Caveat: recall = 1.0 deserves a skeptical read, not just acceptance as "the fix working perfectly"](#83-caveat-recall--10-deserves-a-skeptical-read-not-just-acceptance-as-the-fix-working-perfectly)
+- [8.4 Open question: run-to-run variation in iteration count and `ConvergenceWarning`, unresolved without logging](#84-open-question-run-to-run-variation-in-iteration-count-and-convergencewarning-unresolved-without-logging)
+- [8.5 Minor, non-technical observation](#85-minor-non-technical-observation)
+- [8.6 Updated summary table](#86-updated-summary-table)
+
+</details>
+
+<!-- -->
+
+<!-- -->
+
+<details>
+<summary><a href="#9-update-2026-07-19-per-iteration-logging--first-look-inside-a-runs-actual-search-path">9. Update, 2026-07-19: per-iteration logging — first look inside a run's actual search path</a></summary>
+
+- [9.1 One new logged run, Climate Crashes, `optimization_target="recall"`](#91-one-new-logged-run-climate-crashes-optimization_targetrecall)
+- [9.2 Finding: the log confirms the model-search pattern implied, but not directly observed, in §8](#92-finding-the-log-confirms-the-model-search-pattern-implied-but-not-directly-observed-in-8)
+- [9.3 The original §8.4 question: still not answered, and here's precisely why](#93-the-original-84-question-still-not-answered-and-heres-precisely-why)
+- [9.4 Reconfirming §8.3's precision caveat](#94-reconfirming-83s-precision-caveat)
+- [9.5 Updated summary table](#95-updated-summary-table)
+
+</details>
+
+<!-- -->
+
+<!-- -->
+
+<details>
+<summary><a href="#10-update-2026-07-24-cross-run-comparison-goes-live--the-8493-question-finally-has-real-data-behind-it">10. Update, 2026-07-24: cross-run comparison goes live — the §8.4/§9.3 question finally has real data behind it</a></summary>
+
+- [10.1 Six real runs, Climate Crashes, `optimization_target="recall"`](#101-six-real-runs-climate-crashes-optimization_targetrecall)
+- [10.2 Finding: the warning/iteration-count variation is explained by *which models get proposed at all*, not by the warning alone](#102-finding-the-warningiteration-count-variation-is-explained-by-which-models-get-proposed-at-all-not-by-the-warning-alone)
+- [10.3 Correction: what `warnings.simplefilter("always")` actually protects against](#103-correction-what-warningssimplefilteralways-actually-protects-against)
+- [10.4 Reconfirming the precision caveat, again](#104-reconfirming-the-precision-caveat-again)
+- [10.5 Known limitation: a failed run is invisible to this comparison, not just excluded from it](#105-known-limitation-a-failed-run-is-invisible-to-this-comparison-not-just-excluded-from-it)
+- [10.6 Updated summary table](#106-updated-summary-table)
+
+</details>
+
+<!-- -->
+
+<!-- -->
+
+<details>
+<summary><a href="#11-update-2026-07-27-max_iter-exposed-as-a-tunable-hyperparameter--the-convergencewarning-shortlist-decision-tested-against-3-live-runs">11. Update, 2026-07-27: `max_iter` exposed as a tunable hyperparameter — the ConvergenceWarning shortlist decision, tested against 3 live runs</a></summary>
+
+- [11.1 The shortlist, and the decision made](#111-the-shortlist-and-the-decision-made)
+- [11.2 A caveat stated before, not after, seeing results](#112-a-caveat-stated-before-not-after-seeing-results)
+- [11.3 Three live runs, Climate Crashes, `optimization_target="recall"`, `max_iter` now exposed](#113-three-live-runs-climate-crashes-optimization_targetrecall-max_iter-now-exposed)
+- [11.4 Finding: the mechanism works, exactly as designed — documented fact, not inference](#114-finding-the-mechanism-works-exactly-as-designed--documented-fact-not-inference)
+- [11.5 Finding: Run A isolates `max_iter`'s own effect cleanly; Runs B/C confound it with `C`](#115-finding-run-a-isolates-max_iters-own-effect-cleanly-runs-bc-confound-it-with-c)
+- [11.6 Finding: a new answer that dominates the project's prior typical outcome](#116-finding-a-new-answer-that-dominates-the-projects-prior-typical-outcome)
+- [11.7 Secondary observation, flagged as curious, not explained](#117-secondary-observation-flagged-as-curious-not-explained)
+- [11.8 Updated summary table](#118-updated-summary-table)
+
+</details>
+
+<!-- -->
+
+<!-- -->
+
+<details>
+<summary><a href="#12-update-2026-07-29-the-max_iter-vs-c-confound-resolved-117s-anomaly-explained-and-new-breast-cancer-results">12. Update, 2026-07-29: the `max_iter`-vs-`C` confound resolved, §11.7's anomaly explained, and new Breast Cancer results</a></summary>
+
+- [12.1 Correction: the metric that actually moved was recall, not precision](#121-correction-the-metric-that-actually-moved-was-recall-not-precision)
+- [12.2 The isolation run](#122-the-isolation-run)
+- [12.3 §11.7's anomaly, resolved: not a curiosity, a real reproducibility bug](#123-117s-anomaly-resolved-not-a-curiosity-a-real-reproducibility-bug)
+- [12.4 New results: Breast Cancer across all three model types, post-fix](#124-new-results-breast-cancer-across-all-three-model-types-post-fix)
+- [12.5 Updated summary table](#125-updated-summary-table)
+
+</details>
+
+<!-- -->
+
+<!-- -->
+
+<details>
+<summary><a href="#13-update-2026-08-01-summarize_runs-final-model-resolution-corrected--a-real-breast_cancer-runs-reported-outcome-was-wrong">13. Update, 2026-08-01: `summarize_run`'s final-model resolution corrected — a real breast_cancer run's reported outcome was wrong</a></summary>
+
+- [13.1 What was assumed, and why it was wrong](#131-what-was-assumed-and-why-it-was-wrong)
+- [13.2 The real run](#132-the-real-run)
+- [13.3 The fix, and what it changes about how to read this document](#133-the-fix-and-what-it-changes-about-how-to-read-this-document)
+- [13.4 Deferred: what happens when the flag actually fires](#134-deferred-what-happens-when-the-flag-actually-fires)
+- [13.5 Summary table](#135-summary-table)
+
+</details>
+
+<!-- -->
+
+---
+
 _Written 2026-07-13, following the first real end-to-end verification of
 `gemini_client.py`'s agent loop. Based on 7 live runs (5 Climate Crashes, 2
 Breast Cancer) against a live Gemini model. Findings below are grounded in
