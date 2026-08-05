@@ -1,5 +1,178 @@
 # Technical Notes
 
+_Companion to [`DATA_SCIENCE_ANALYSIS.md`](./DATA_SCIENCE_ANALYSIS.md) — this file covers implementation decisions; that one covers methodology and findings. Most working sessions touched both, on the same date, about the same piece of work — see the session map below._
+
+---
+
+## Session map: how this file lines up with `DATA_SCIENCE_ANALYSIS.md`
+
+```
+TECHNICAL_NOTES.md (this file)                    DATA_SCIENCE_ANALYSIS.md
+──────────────────────────────────────────────────────────────────────────
+Part 1   2026-07-13  eval & deferred, not built    ·   (no DS counterpart)
+Part 2   2026-07-17  orchestration-loop wiring     ──▶ §8   optimization-target fix, tested live
+Part 3   2026-07-19  per-iteration logging         ──▶ §9   first look inside a run
+Part 4   2026-07-24  warning capture + compare     ──▶ §10  cross-run comparison goes live
+Part 5   2026-07-27  max_iter exposed              ──▶ §11  max_iter tested against 3 live runs
+Part 6   2026-07-29  reproducibility fix            ──▶ §12  max_iter-vs-C confound resolved
+Part 7   2026-08-01  reporting.py, final-model fix  ──▶ §13  final-model resolution corrected
+Part 8   2026-08-03  test_trainer.py, 17 tests     ─ ─ ▶ §13  (cross-reference only, no new run)
+```
+
+---
+
+## Status index
+
+| Part | Date | Covers | Status | See also |
+|---|---|---|---|---|
+| [1](#part-1-gemini_clientpy-conversation-history-cost-scaling) | 2026-07-13 | Gemini conversation-history cost scaling | Evaluated & deferred — not built | — |
+| [2](#part-2-orchestration-loop-wiring--implementation-details-2026-07-17) | 2026-07-17 | Orchestration-loop wiring (`DispatchResult`, `run_session`) | Implemented, verified (3 live runs) | [DS §8](./DATA_SCIENCE_ANALYSIS.md#8-update-2026-07-17-the-optimization-target-fix-tested-for-the-first-time-against-a-live-agent) |
+| [3](#part-3-per-iteration-logging-in-run_agent_loop-2026-07-19) | 2026-07-19 | Per-iteration logging in `run_agent_loop` | Implemented, verified (1 live run) | [DS §9](./DATA_SCIENCE_ANALYSIS.md#9-update-2026-07-19-per-iteration-logging--first-look-inside-a-runs-actual-search-path) |
+| [4](#part-4-fit-time-warning-capture-corrected-run-persistence-and-cross-run-comparison-2026-07-24) | 2026-07-24 | Fit-time warning capture, cross-run comparison (`compare_runs.py`) | Implemented, verified (6 live runs) | [DS §10](./DATA_SCIENCE_ANALYSIS.md#10-update-2026-07-24-cross-run-comparison-goes-live--the-8493-question-finally-has-real-data-behind-it) |
+| [5](#part-5-max_iter-exposed-as-a-hyperparameter-confirming-the-agent-reasoning-pathway-was-already-wired-2026-07-27) | 2026-07-27 | `max_iter` exposed as a hyperparameter; `ConvergenceWarning` shortlist resolved | Implemented, verified (3 live runs) | [DS §11](./DATA_SCIENCE_ANALYSIS.md#11-update-2026-07-27-max_iter-exposed-as-a-tunable-hyperparameter--the-convergencewarning-shortlist-decision-tested-against-3-live-runs) |
+| [6](#part-6-results-file-renaming-compare-subcommand-and-the-reproducibility-fix-2026-07-29) | 2026-07-29 | Results-file renaming, `compare` subcommand, reproducibility fix (`random_state`) | Implemented, verified | [DS §12](./DATA_SCIENCE_ANALYSIS.md#12-update-2026-07-29-the-max_iter-vs-c-confound-resolved-117s-anomaly-explained-and-new-breast-cancer-results) |
+| [7](#part-7-results-reporting-reportingpy-a-real-final-model-bug-fix-and-a-pytest-collection-bug-2026-08-01) | 2026-08-01 | `reporting.py`, final-model bug fix, pytest collection bug | Implemented | [DS §13](./DATA_SCIENCE_ANALYSIS.md#13-update-2026-08-01-summarize_runs-final-model-resolution-corrected--a-real-breast_cancer-runs-reported-outcome-was-wrong) |
+| [8](#part-8-teststest_trainerpy--reproducibility-test-coverage-and-an-empirical-debugging-chain-2026-08-03-session) | 2026-08-03 | `tests/test_trainer.py` — 17 tests, `ConvergenceWarning` debugging chain | Implemented, 17/17 passing | [DS §13](./DATA_SCIENCE_ANALYSIS.md#13-update-2026-08-01-summarize_runs-final-model-resolution-corrected--a-real-breast_cancer-runs-reported-outcome-was-wrong) (cross-ref only) |
+
+---
+
+## Table of contents
+
+<!-- -->
+
+<details>
+<summary><a href="#part-1-gemini_clientpy-conversation-history-cost-scaling">Part 1: `gemini_client.py` Conversation-History Cost Scaling</a></summary>
+
+- [Why this matters (and why it doesn't, yet)](#why-this-matters-and-why-it-doesnt-yet)
+- [`client.chats.create()`'s internal dynamics](#clientchatscreates-internal-dynamics)
+- [The actual cost shape — precisely, not loosely](#the-actual-cost-shape--precisely-not-loosely)
+- [Mitigation options considered](#mitigation-options-considered)
+
+</details>
+
+<!-- -->
+
+<!-- -->
+
+<details>
+<summary><a href="#part-2-orchestration-loop-wiring--implementation-details-2026-07-17">Part 2: Orchestration-loop wiring — implementation details (2026-07-17)</a></summary>
+
+- [2.1 `build_dispatch_table`'s return type: `DispatchResult`](#21-build_dispatch_tables-return-type-dispatchresult)
+- [2.2 `TOOL_FUNCTIONS` reuse in `build_dispatch_table`](#22-tool_functions-reuse-in-build_dispatch_table)
+- [2.3 Optimization target: explicit parameter, not hardcoded](#23-optimization-target-explicit-parameter-not-hardcoded)
+- [2.4 `run_session`: the new orchestration entry point](#24-run_session-the-new-orchestration-entry-point)
+- [2.5 `run_smoke_test.py`: replaced, not just superseded](#25-run_smoke_testpy-replaced-not-just-superseded)
+- [2.6 Planned, not built: per-iteration logging in `run_agent_loop`](#26-planned-not-built-per-iteration-logging-in-run_agent_loop)
+
+</details>
+
+<!-- -->
+
+<!-- -->
+
+<details>
+<summary><a href="#part-3-per-iteration-logging-in-run_agent_loop-2026-07-19">Part 3: Per-iteration logging in `run_agent_loop` (2026-07-19)</a></summary>
+
+- [3.1 `TOOL_FUNCTIONS`-rename test](#31-tool_functions-rename-test)
+- [3.2 `log_iterations` parameter: design and rationale](#32-log_iterations-parameter-design-and-rationale)
+- [3.3 `format_log()`: shared display utility](#33-format_log-shared-display-utility)
+- [3.4 `run_smoke_test.py`: consumption pattern (not committed — file is gitignored)](#34-run_smoke_testpy-consumption-pattern-not-committed--file-is-gitignored)
+- [3.5 What this does and doesn't solve, precisely](#35-what-this-does-and-doesnt-solve-precisely)
+
+</details>
+
+<!-- -->
+
+<!-- -->
+
+<details>
+<summary><a href="#part-4-fit-time-warning-capture-corrected-run-persistence-and-cross-run-comparison-2026-07-24">Part 4: Fit-time warning capture, corrected run persistence, and cross-run comparison (2026-07-24)</a></summary>
+
+- [4.1 Fit-time warning capture in `trainer.py`](#41-fit-time-warning-capture-in-trainerpy)
+- [4.2 Correction: what `simplefilter("always")` actually protects against](#42-correction-what-simplefilteralways-actually-protects-against)
+- [4.3 `run_smoke_test.py`: persistence correction and timing (gitignored, not committed package code)](#43-run_smoke_testpy-persistence-correction-and-timing-gitignored-not-committed-package-code)
+- [4.4 `ml_agent/compare_runs.py`: design and implementation](#44-ml_agentcompare_runspy-design-and-implementation)
+- [4.5 Known limitations, not fixed this session](#45-known-limitations-not-fixed-this-session)
+
+</details>
+
+<!-- -->
+
+<!-- -->
+
+<details>
+<summary><a href="#part-5-max_iter-exposed-as-a-hyperparameter-confirming-the-agent-reasoning-pathway-was-already-wired-2026-07-27">Part 5: `max_iter` exposed as a hyperparameter; confirming the agent-reasoning pathway was already wired (2026-07-27)</a></summary>
+
+- [5.1 `test_tools.py` review — the first item on this session's agenda](#51-test_toolspy-review--the-first-item-on-this-sessions-agenda)
+- [5.2 The `ConvergenceWarning` shortlist, narrowed to a decision](#52-the-convergencewarning-shortlist-narrowed-to-a-decision)
+- [5.3 Schema change: `max_iter` added to `list_available_models`](#53-schema-change-max_iter-added-to-list_available_models)
+- [5.4 Confirming option B required zero new code — traced directly through `gemini_client.py`](#54-confirming-option-b-required-zero-new-code--traced-directly-through-gemini_clientpy)
+- [5.5 Housekeeping: stale docstring corrected in `trainer.py`](#55-housekeeping-stale-docstring-corrected-in-trainerpy)
+- [5.6 Verified against 3 live runs](#56-verified-against-3-live-runs)
+- [5.7 Not built this session, flagged for later](#57-not-built-this-session-flagged-for-later)
+- [5.8 Quick reference: adding a new dataset](#58-quick-reference-adding-a-new-dataset)
+- [5.9 `MAX_ITERATIONS` raised from 10 to 15 — closing the 07-12 open decision](#59-max_iterations-raised-from-10-to-15--closing-the-07-12-open-decision)
+
+</details>
+
+<!-- -->
+
+<!-- -->
+
+<details>
+<summary><a href="#part-6-results-file-renaming-compare-subcommand-and-the-reproducibility-fix-2026-07-29">Part 6: Results-file renaming, `compare` subcommand, and the reproducibility fix (2026-07-29)</a></summary>
+
+- [6.1 Results-file renaming: `smoke_test_log_<timestamp>.json` → `result_log_<timestamp>_<dataset_name>.json`](#61-results-file-renaming-smoke_test_log_timestampjson--result_log_timestamp_dataset_namejson)
+- [6.2 Migration: `rename_results.py`](#62-migration-rename_resultspy)
+- [6.3 `compare_runs.py`: `build_comparison` gains a `dataset_name` filter](#63-compare_runspy-build_comparison-gains-a-dataset_name-filter)
+- [6.4 `main.py`: the `compare` subcommand](#64-mainpy-the-compare-subcommand)
+- [6.5 `main.py`: free-tier rate-limit note](#65-mainpy-free-tier-rate-limit-note)
+- [6.6 Reproducibility fix: `random_state` threaded into every estimator](#66-reproducibility-fix-random_state-threaded-into-every-estimator)
+- [6.7 A deliberate, discussed trade-off: one shared seed, not two](#67-a-deliberate-discussed-trade-off-one-shared-seed-not-two)
+- [6.8 Verified against real data](#68-verified-against-real-data)
+- [6.9 Git commit ordering, this session](#69-git-commit-ordering-this-session)
+
+</details>
+
+<!-- -->
+
+<!-- -->
+
+<details>
+<summary><a href="#part-7-results-reporting-reportingpy-a-real-final-model-bug-fix-and-a-pytest-collection-bug-2026-08-01">Part 7: Results reporting (`reporting.py`), a real final-model bug fix, and a pytest collection bug (2026-08-01)</a></summary>
+
+- [7.1 The bug: "last `evaluate_model` in the log = final model" was wrong](#71-the-bug-last-evaluate_model-in-the-log--final-model-was-wrong)
+- [7.2 Fix: best-by-target resolution, plus a structural mismatch flag](#72-fix-best-by-target-resolution-plus-a-structural-mismatch-flag)
+- [7.3 `ml_agent/reporting.py`: CSV export and Markdown viewer](#73-ml_agentreportingpy-csv-export-and-markdown-viewer)
+- [7.4 `main.py`: `export` and `report` subcommands](#74-mainpy-export-and-report-subcommands)
+- [7.5 Item #17 resolved: standalone `compare_runs.py` entry point now requires a dataset](#75-item-17-resolved-standalone-compare_runspy-entry-point-now-requires-a-dataset)
+- [7.6 A latent bug found via manual testing: pytest silently importing and executing `run_smoke_test.py`](#76-a-latent-bug-found-via-manual-testing-pytest-silently-importing-and-executing-run_smoke_testpy)
+- [7.7 Test coverage added: `test_compare_runs.py`, `test_reporting.py`](#77-test-coverage-added-test_compare_runspy-test_reportingpy)
+- [7.8 Correction: the `TOOL_FUNCTIONS` override-guard test already existed — dated precisely](#78-correction-the-tool_functions-override-guard-test-already-existed--dated-precisely)
+- [7.9 Git commit ordering, this session](#79-git-commit-ordering-this-session)
+
+</details>
+
+<!-- -->
+
+<!-- -->
+
+<details>
+<summary><a href="#part-8-teststest_trainerpy--reproducibility-test-coverage-and-an-empirical-debugging-chain-2026-08-03-session">Part 8: `tests/test_trainer.py` — reproducibility test coverage, and an empirical debugging chain (2026-08-03 session)</a></summary>
+
+- [8.1 Why this file existed as an open item, and what closing it required](#81-why-this-file-existed-as-an-open-item-and-what-closing-it-required)
+- [8.2 What the 17 tests check](#82-what-the-17-tests-check)
+- [8.3 The `ConvergenceWarning` test: three attempts, the two that failed and why, and the one that was verified before shipping](#83-the-convergencewarning-test-three-attempts-the-two-that-failed-and-why-and-the-one-that-was-verified-before-shipping)
+- [8.4 `numpy` added as a dev dependency](#84-numpy-added-as-a-dev-dependency)
+- [8.5 A secondary, smaller correction: `testpaths` vs. an explicit path argument](#85-a-secondary-smaller-correction-testpaths-vs-an-explicit-path-argument)
+- [8.6 Git commit, this session](#86-git-commit-this-session)
+
+</details>
+
+<!-- -->
+
+---
+
 ## Part 1: `gemini_client.py` Conversation-History Cost Scaling
 
 _Status: speculative, deferred, NOT IMPLEMENTED. Written 2026-07-13 as a
