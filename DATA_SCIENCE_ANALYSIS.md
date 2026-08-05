@@ -42,22 +42,36 @@ Part 8   2026-08-03  test_trainer.py, 17 tests     ─ ─ ▶ §13  (cross-refe
 ---
 
 ## Table of contents
+<details>
+<summary><a href="#1-the-dataset-asymmetry-this-analysis-depends-on">1. The dataset asymmetry this analysis depends on</a></summary>
+</details>
 
-- [1. The dataset asymmetry this analysis depends on](#1-the-dataset-asymmetry-this-analysis-depends-on)
+<details>
+<summary><a href="#2-full-run-results">2. Full run results</a></summary>
+</details>
 
-- [2. Full run results](#2-full-run-results)
+<details>
+<summary><a href="#3-finding-convergence-speed-and-consistency-track-dataset-difficulty">3. Finding: convergence speed and consistency track dataset difficulty</a></summary>
+</details>
 
-- [3. Finding: convergence speed and consistency track dataset difficulty](#3-finding-convergence-speed-and-consistency-track-dataset-difficulty)
+<details>
+<summary><a href="#4-finding-the-missing-optimization-target-is-a-real,-observed-problem-—-not-just-a-theoretical-gap">4. Finding: the missing optimization target is a real, observed problem — not just a theoretical gap</a></summary>
+</details>
 
-- [4. Finding: the missing optimization target is a real, observed problem — not just a theoretical gap](#4-finding-the-missing-optimization-target-is-a-real-observed-problem--not-just-a-theoretical-gap)
+<details>
+<summary><a href="#5-finding-non-determinism-is-real,-but-may-be-partly-a-budget-artifact,-not-pure-randomness">5. Finding: non-determinism is real, but may be partly a budget artifact, not pure randomness</a></summary>
+</details>
 
-- [5. Finding: non-determinism is real, but may be partly a budget artifact, not pure randomness](#5-finding-non-determinism-is-real-but-may-be-partly-a-budget-artifact-not-pure-randomness)
+<details>
+<summary><a href="#6-secondary-finding-logisticregressions-convergence-warning-is-systematic,-not-incidental">6. Secondary finding: `LogisticRegression`'s convergence warning is systematic, not incidental</a></summary>
+</details>
 
-- [6. Secondary finding: `LogisticRegression`'s convergence warning is systematic, not incidental](#6-secondary-finding-logisticregressions-convergence-warning-is-systematic-not-incidental)
+<details>
+<summary><a href="#7-summary-as-of-2026-07-13">7. Summary (as of 2026-07-13)</a></summary>
+</details>
 
-- [7. Summary (as of 2026-07-13)](#7-summary-as-of-2026-07-13)
 
-<!-- -->
+
 
 <details>
 <summary><a href="#8-update-2026-07-17-the-optimization-target-fix-tested-for-the-first-time-against-a-live-agent">8. Update, 2026-07-17: the optimization-target fix, tested for the first time against a live agent</a></summary>
