@@ -1,5 +1,241 @@
 # ml-agent
 
+This file is the original, unedited development log — every session, in the order it happened, including dead ends and corrections made in place rather than edited away. `README.md`, `TECHNICAL_NOTES.md`, and `DATA_SCIENCE_ANALYSIS.md` each give a cleaner, shorter cut through parts of this same story; this file is where the reader can dig in much deeper if they want to follow the full development journey behind this project.
+
+**How to read this file.** Sessions here have same-day counterparts in `TECHNICAL_NOTES.md` (and, from 2026-07-17 onward, `DATA_SCIENCE_ANALYSIS.md`) — see those files' own session maps for how the three line up. A short "Problem, briefly" box sits at the start of each major thread here, pointing forward to where that thread gets its cleaner treatment. Some reference sections (setup, datasets, security, project structure) now just link to `README.md`'s shorter version rather than repeat it — nothing was cut, only de-duplicated.
+
+---
+
+## Status index
+
+| Section | Date | Covers | See also |
+|---|---|---|---|
+| [Concept](#concept) | — | Core architectural principle | [README §Architecture](../README.md#architecture--design-choices) |
+| [Tool architecture: Category A vs Category B](#tool-architecture-category-a-execution-vs-category-b-decision) | — | Execution vs. decision tool split | [README §Architecture](../README.md#architecture--design-choices) |
+| [`test_tools.py`](#test_toolspy--the-schemafunction-drift-check) | 2026-07-15 → 07-27 | Schema/function drift check | — |
+| [`gemini_client.py` — the agent loop](#gemini_clientpy--the-agent-loop) | — | Native function-calling loop design | — |
+| [Per-iteration logging](#per-iteration-logging-2026-07-19) | 2026-07-19 | Opt-in per-iteration logging | [TN Part 3](./TECHNICAL_NOTES.md#part-3-per-iteration-logging-in-run_agent_loop-2026-07-19)/[DS §9](./DATA_SCIENCE_ANALYSIS.md#9-update-2026-07-19-per-iteration-logging--first-look-inside-a-runs-actual-search-path) |
+| [Cross-run comparison](#cross-run-comparison-2026-07-24-renamed-and-dataset-scoped-2026-07-29) | 2026-07-24 → 07-29 | `compare_runs.py`, `compare` subcommand | [TN Part 4](./TECHNICAL_NOTES.md#part-4-fit-time-warning-capture-corrected-run-persistence-and-cross-run-comparison-2026-07-24)/[DS §10](./DATA_SCIENCE_ANALYSIS.md#10-update-2026-07-24-cross-run-comparison-goes-live--the-8493-question-finally-has-real-data-behind-it) |
+| [Results reporting](#results-reporting-csv-export-and-the-markdown-viewer-2026-08-01) | 2026-08-01 | `reporting.py`, final-model bug fix | [TN Part 7](./TECHNICAL_NOTES.md#part-7-results-reporting-reportingpy-a-real-final-model-bug-fix-and-a-pytest-collection-bug-2026-08-01)/[DS §13](./DATA_SCIENCE_ANALYSIS.md#13-update-2026-08-01-summarize_runs-final-model-resolution-corrected--a-real-breast_cancer-runs-reported-outcome-was-wrong) |
+| [Fit-time warning capture](#fit-time-warning-capture-2026-07-24) | 2026-07-24 | Warning capture, all categories | [TN Part 4](./TECHNICAL_NOTES.md#part-4-fit-time-warning-capture-corrected-run-persistence-and-cross-run-comparison-2026-07-24) |
+| [Closing the `ConvergenceWarning` shortlist](#closing-the-convergencewarning-shortlist-2026-07-27) | 2026-07-27 | `max_iter` exposed, shortlist decided | [TN Part 5](./TECHNICAL_NOTES.md#part-5-max_iter-exposed-as-a-hyperparameter-confirming-the-agent-reasoning-pathway-was-already-wired-2026-07-27)/[DS §11](./DATA_SCIENCE_ANALYSIS.md#11-update-2026-07-27-max_iter-exposed-as-a-tunable-hyperparameter--the-convergencewarning-shortlist-decision-tested-against-3-live-runs) |
+| [Reproducibility: seeding every estimator](#reproducibility-seeding-every-estimator-2026-07-29) | 2026-07-29 | `random_state` bug found & fixed | [TN Part 6](./TECHNICAL_NOTES.md#part-6-results-file-renaming-compare-subcommand-and-the-reproducibility-fix-2026-07-29)/[DS §12](./DATA_SCIENCE_ANALYSIS.md#12-update-2026-07-29-the-max_iter-vs-c-confound-resolved-117s-anomaly-explained-and-new-breast-cancer-results) |
+| [`Trainer` — model storage and encapsulation](#trainer--model-storage-and-encapsulation) | — | Storage/validation design | — |
+| [Validating Gemini's arguments](#validating-geminis-arguments-before-training) | — | Hyperparameter validation design | — |
+| [`agent.py` — wiring the dispatch table](#agentpy--wiring-the-dispatch-table) | 2026-07-17 | `DispatchResult`, `run_session`, optimization-target fix | [TN Part 2](./TECHNICAL_NOTES.md#part-2-orchestration-loop-wiring--implementation-details-2026-07-17)/[DS §8](./DATA_SCIENCE_ANALYSIS.md#8-update-2026-07-17-the-optimization-target-fix-tested-for-the-first-time-against-a-live-agent) |
+| [`main.py` — the CLI entry point](#mainpy--the-cli-entry-point-2026-07-27-extended-2026-07-29-2026-08-01) | 2026-07-27 → 08-01 | CLI design, dataset menu | — |
+| [Project structure](#project-structure) | — | Annotated file tree | [README §Project Structure](../README.md#project-structure) (current, non-annotated version) |
+| [Datasets](#datasets) | — | Dataset registry, `pos_label` | [README §Datasets](../README.md#datasets) (quick version) |
+| [Available models](#available-models-via-list_available_models) | — | Hyperparameter ranges | [README §Datasets](../README.md#datasets) (quick version) |
+| [Setup](#setup) | — | Install steps | [README §Quickstart](../README.md#quickstart) |
+| [Running](#running) | — | Run commands, subcommands | [README §Quickstart](../README.md#quickstart) |
+| [Testing](#testing) | — | Test suite, `testpaths` bug | — |
+| [Security](#security) | — | (was just a pointer) | [README §Security](../README.md#security), [SECURITY.md](./SECURITY.md) |
+| [Roadmap context](#roadmap-context) | — | Progression + human-in-the-loop design | [README §Roadmap](../README.md#roadmap--future-improvements) (brief version) |
+| [Development Notes](#development-notes) | — | Per-session recap, all sessions | — |
+
+---
+
+## Table of contents
+
+<details>
+<summary><a href="#concept">Concept</a></summary>
+
+- [Core architectural principle](#core-architectural-principle)
+
+</details>
+
+<details>
+<summary><a href="#tool-architecture-category-a-execution-vs-category-b-decision">Tool architecture: Category A (execution) vs Category B (decision)</a></summary>
+
+</details>
+
+<details>
+<summary><a href="#test_toolspy--the-schemafunction-drift-check">`test_tools.py` — the schema/function drift check</a></summary>
+
+- [Why this exists](#why-this-exists)
+- [The mechanism](#the-mechanism)
+- [Extension (2026-07-19): guarding the dispatch-table override keys](#extension-2026-07-19-guarding-the-dispatch-table-override-keys)
+- [Reviewed and resolved (2026-07-27)](#reviewed-and-resolved-2026-07-27)
+
+</details>
+
+<details>
+<summary><a href="#gemini_clientpy--the-agent-loop">`gemini_client.py` — the agent loop</a></summary>
+
+- [Design decisions, stated explicitly](#design-decisions-stated-explicitly)
+- [`client.chats.create()` — internal dynamics](#clientchatscreate--internal-dynamics)
+
+</details>
+
+<details>
+<summary><a href="#per-iteration-logging-2026-07-19">Per-iteration logging (2026-07-19)</a></summary>
+
+- [Why this exists](#why-this-exists-1)
+- [How it works](#how-it-works)
+- [Reading a log](#reading-a-log)
+- [Persistence (smoke-test usage only, not committed package behavior)](#persistence-smoke-test-usage-only-not-committed-package-behavior)
+
+</details>
+
+<details>
+<summary><a href="#cross-run-comparison-2026-07-24-renamed-and-dataset-scoped-2026-07-29">Cross-run comparison (2026-07-24; renamed and dataset-scoped 2026-07-29)</a></summary>
+
+- [Why this exists](#why-this-exists-2)
+- [How it works](#how-it-works-1)
+- [Renamed and dataset-scoped (2026-07-29)](#renamed-and-dataset-scoped-2026-07-29)
+- [Discoverability: the `compare` subcommand (2026-07-29)](#discoverability-the-compare-subcommand-2026-07-29)
+- [Verified against real data](#verified-against-real-data)
+- [Known limitation, reproduced and documented, still not fixed](#known-limitation-reproduced-and-documented-still-not-fixed)
+
+</details>
+
+<details>
+<summary><a href="#results-reporting-csv-export-and-the-markdown-viewer-2026-08-01">Results reporting: CSV export and the Markdown viewer (2026-08-01)</a></summary>
+
+- [Why this exists](#why-this-exists-3)
+- [How it works](#how-it-works-2)
+- [A real bug found while building this: "last evaluated = final model" was wrong](#a-real-bug-found-while-building-this-last-evaluated--final-model-was-wrong)
+- [The `export` and `report` subcommands](#the-export-and-report-subcommands)
+- [Verified against real data](#verified-against-real-data-1)
+
+</details>
+
+<details>
+<summary><a href="#fit-time-warning-capture-2026-07-24">Fit-time warning capture (2026-07-24)</a></summary>
+
+- [Why this exists](#why-this-exists-4)
+- [How it works](#how-it-works-3)
+- [Verified against real data](#verified-against-real-data-2)
+- [Resolved (2026-07-27)](#resolved-2026-07-27)
+
+</details>
+
+<details>
+<summary><a href="#closing-the-convergencewarning-shortlist-2026-07-27">Closing the `ConvergenceWarning` shortlist (2026-07-27)</a></summary>
+
+- [The shortlist, and the decision made](#the-shortlist-and-the-decision-made)
+- [The plumbing was already there — nothing needed building for option B](#the-plumbing-was-already-there--nothing-needed-building-for-option-b)
+- [Schema change: `max_iter` added to `list_available_models`](#schema-change-max_iter-added-to-list_available_models)
+- [Verified against 3 live runs](#verified-against-3-live-runs)
+- [The `max_iter`-vs-`C` confound, isolated (2026-07-29)](#the-max_iter-vs-c-confound-isolated-2026-07-29)
+
+</details>
+
+<details>
+<summary><a href="#reproducibility-seeding-every-estimator-2026-07-29">Reproducibility: seeding every estimator (2026-07-29)</a></summary>
+
+- [The bug, found via a real anomaly, not a code review](#the-bug-found-via-a-real-anomaly-not-a-code-review)
+- [The fix](#the-fix)
+- [A deliberate trade-off, decided rather than defaulted into](#a-deliberate-trade-off-decided-rather-than-defaulted-into)
+- [Verified against real data](#verified-against-real-data-3)
+- [Test coverage (`test_trainer.py`, 2026-08-03)](#test-coverage-test_trainerpy-2026-08-03)
+
+</details>
+
+<details>
+<summary><a href="#trainer--model-storage-and-encapsulation">`Trainer` — model storage and encapsulation</a></summary>
+
+- [The problem](#the-problem)
+- [`Trainer` class (final form)](#trainer-class-final-form)
+
+</details>
+
+<details>
+<summary><a href="#validating-geminis-arguments-before-training">Validating Gemini's arguments before training</a></summary>
+
+- [The problem this solves](#the-problem-this-solves)
+- [Design: a standalone function, not a `Trainer` method](#design-a-standalone-function-not-a-trainer-method)
+- [A schema ambiguity, caught and fixed](#a-schema-ambiguity-caught-and-fixed)
+
+</details>
+
+<details>
+<summary><a href="#agentpy--wiring-the-dispatch-table">`agent.py` — wiring the dispatch table</a></summary>
+
+- [The problem](#the-problem-1)
+- [`DispatchResult`: why `build_dispatch_table`'s return type changed (2026-07-17)](#dispatchresult-why-build_dispatch_tables-return-type-changed-2026-07-17)
+- [`run_session`: the orchestration entry point (2026-07-17; extended 2026-07-19)](#run_session-the-orchestration-entry-point-2026-07-17-extended-2026-07-19)
+- [What's genuinely still missing](#whats-genuinely-still-missing)
+
+</details>
+
+<details>
+<summary><a href="#mainpy--the-cli-entry-point-2026-07-27-extended-2026-07-29-2026-08-01">`main.py` — the CLI entry point (2026-07-27; extended 2026-07-29, 2026-08-01)</a></summary>
+
+- [Why this needed building specifically](#why-this-needed-building-specifically)
+- [How the dataset menu stays in sync with the registry, automatically](#how-the-dataset-menu-stays-in-sync-with-the-registry-automatically)
+- [What's a genuine judgment call vs. a secondary knob](#whats-a-genuine-judgment-call-vs-a-secondary-knob)
+- [The `compare` subcommand (2026-07-29)](#the-compare-subcommand-2026-07-29)
+- [The `export` and `report` subcommands (2026-08-01)](#the-export-and-report-subcommands-2026-08-01)
+- [Free-tier rate limit note (2026-07-29)](#free-tier-rate-limit-note-2026-07-29)
+- [Renamed results-file convention (2026-07-29)](#renamed-results-file-convention-2026-07-29)
+- [Verified against real live runs](#verified-against-real-live-runs)
+
+</details>
+
+<details>
+<summary><a href="#project-structure">Project structure</a></summary>
+
+- [Why `agent.py` and `gemini_client.py` are separate](#why-agentpy-and-gemini_clientpy-are-separate)
+
+</details>
+
+<details>
+<summary><a href="#datasets">Datasets</a></summary>
+
+- [What `pos_label` actually is](#what-pos_label-actually-is)
+
+</details>
+
+<details>
+<summary><a href="#available-models-via-list_available_models">Available models (via `list_available_models`)</a></summary>
+
+</details>
+
+<details>
+<summary><a href="#setup">Setup</a></summary>
+
+</details>
+
+<details>
+<summary><a href="#running">Running</a></summary>
+
+</details>
+
+<details>
+<summary><a href="#testing">Testing</a></summary>
+
+</details>
+
+<details>
+<summary><a href="#security">Security</a></summary>
+
+</details>
+
+<details>
+<summary><a href="#roadmap-context">Roadmap context</a></summary>
+
+- [Progression of "next up"](#progression-of-next-up)
+- [Human-in-the-loop design (explored 2026-08-03, implementation deferred)](#human-in-the-loop-design-explored-2026-08-03-implementation-deferred)
+
+</details>
+
+<details>
+<summary><a href="#development-notes">Development Notes</a></summary>
+
+- [Real-world debugging notes (2026-07-13 session)](#real-world-debugging-notes-2026-07-13-session)
+- [Testing/tooling notes (2026-07-15 session)](#testingtooling-notes-2026-07-15-session)
+- [Orchestration wiring notes (2026-07-17 session)](#orchestration-wiring-notes-2026-07-17-session)
+- [CLI entry point and threshold-revisiting notes (2026-07-27 session)](#cli-entry-point-and-threshold-revisiting-notes-2026-07-27-session)
+- [Reproducibility, naming, and discoverability notes (2026-07-29 session)](#reproducibility-naming-and-discoverability-notes-2026-07-29-session)
+- [Results reporting and two real bugs found (2026-08-01 session)](#results-reporting-and-two-real-bugs-found-2026-08-01-session)
+- [Test design and empirical verification notes (2026-08-03 session)](#test-design-and-empirical-verification-notes-2026-08-03-session)
+
+</details>
+
+---
+
 _Last updated: 2026-08-03_
 
 Agentic ML experimentation assistant — an LLM (Gemini) orchestrates dataset inspection, model proposal, training, and evaluation over scikit-learn via native function-calling, iterating toward a target metric in a supervised loop.
@@ -182,7 +418,7 @@ Keyword-only parameters (the internally-injected ones, e.g. `evaluate_model`'s `
 
 ### Extension (2026-07-19): guarding the dispatch-table override keys
 
-A fourth test, `test_dispatch_table_override_keys_exist()`, asserts that `"train_model"` and `"evaluate_model"` still exist as keys in `TOOL_FUNCTIONS` — added as explicit, by-name documentation of a concern originally raised during the 2026-07-17 orchestration wiring. Worth being precise about what this test actually guards, since the original stated rationale for it turned out to be inaccurate on closer inspection: `agent.py`'s dispatch-table override uses **literal string keys**, not a lookup into `TOOL_FUNCTIONS`, so a rename inside `TOOL_FUNCTIONS` cannot silently break that override the way it was originally described as doing. The real failure mode a rename *can* cause — `TOOL_SCHEMAS` declaring a tool name no longer present in `TOOL_FUNCTIONS` — was already caught by the pre-existing "every schema has a registered function" check above. This new test is retained as cheap, explicit documentation of the concern, not because it closes a gap that genuinely existed. Full detail in `TECHNICAL_NOTES.md` §2.2's correction note and Part 3, §3.1.
+A fourth test, `test_dispatch_table_override_keys_exist()`, asserts that `"train_model"` and `"evaluate_model"` still exist as keys in `TOOL_FUNCTIONS` — added as explicit, by-name documentation of a concern originally raised during the 2026-07-17 orchestration wiring. What this test actually guards, precisely: the original stated rationale for it turned out to be inaccurate on closer inspection — `agent.py`'s dispatch-table override uses **literal string keys**, not a lookup into `TOOL_FUNCTIONS`, so a rename inside `TOOL_FUNCTIONS` cannot silently break that override the way it was originally described as doing. The real failure mode a rename *can* cause — `TOOL_SCHEMAS` declaring a tool name no longer present in `TOOL_FUNCTIONS` — was already caught by the pre-existing "every schema has a registered function" check above. This new test is retained as cheap, explicit documentation of the concern, not because it closes a gap that genuinely existed. Full detail in `TECHNICAL_NOTES.md` §2.2's correction note and Part 3, §3.1.
 
 ### Reviewed and resolved (2026-07-27)
 
@@ -441,6 +677,9 @@ A run that crashes before completing (e.g. hitting the Gemini API's own free-tie
 
 ---
 
+> **Problem, briefly:** a heuristic assuming "last evaluated model = final model" was quietly wrong on a real run — the model the agent actually chose wasn't the last one it had evaluated.
+> **Thread:** this section fixes it; a cleaner, condensed account is in [TN Part 7](./TECHNICAL_NOTES.md#part-7-results-reporting-reportingpy-a-real-final-model-bug-fix-and-a-pytest-collection-bug-2026-08-01)/[DS §13](./DATA_SCIENCE_ANALYSIS.md#13-update-2026-08-01-summarize_runs-final-model-resolution-corrected--a-real-breast_cancer-runs-reported-outcome-was-wrong).
+
 ## Results reporting: CSV export and the Markdown viewer (2026-08-01)
 
 ### Why this exists
@@ -544,6 +783,9 @@ Capturing the warning is not the same as fixing the underlying cause — this wa
 
 ---
 
+> **Problem, briefly:** `LogisticRegression` kept emitting a `ConvergenceWarning` across runs — an open question of whether it was a real correctness issue or just a `max_iter` cap set too low.
+> **Thread:** this section exposes `max_iter` and decides the shortlist; a cleaner, condensed account is in [TN Part 5](./TECHNICAL_NOTES.md#part-5-max_iter-exposed-as-a-hyperparameter-confirming-the-agent-reasoning-pathway-was-already-wired-2026-07-27)/[DS §11](./DATA_SCIENCE_ANALYSIS.md#11-update-2026-07-27-max_iter-exposed-as-a-tunable-hyperparameter--the-convergencewarning-shortlist-decision-tested-against-3-live-runs).
+
 ## Closing the `ConvergenceWarning` shortlist (2026-07-27)
 
 ### The shortlist, and the decision made
@@ -588,7 +830,7 @@ A single-site addition to `tools.py`'s `logistic_regression` hyperparameters —
 
 All three runs (Climate Crashes, `optimization_target="recall"`) show the intended chain working end-to-end: a `ConvergenceWarning` appears in `train_model`'s result → the agent's own `record_model_proposal`/`record_convergence_decision` reasoning references it explicitly → the agent re-proposes Logistic Regression with `max_iter` raised → the warning clears. One run isolated `max_iter` as the *only* changed value on retry — recall/precision/the full confusion matrix came back bit-identical to the pre-retry attempt, meaning the warning was a reporting problem, not an accuracy problem, in that instance. Two other runs changed `max_iter` and `C` together, reaching a better precision (0.25 vs. the prior typical 0.18) than either the original six-run table's usual outcome — but since both changed together, which one actually drove the improvement is a plausible inference from comparing across runs, not proven directly. Full run-by-run findings, including this confound and a proposed follow-up to isolate it, are in [`DATA_SCIENCE_ANALYSIS.md`](./DATA_SCIENCE_ANALYSIS.md) §11.
 
-**Worth stating plainly, not overclaiming:** this confirms the data *reaches* Gemini and that the mechanism functions end-to-end on 3 real runs — it isn't a guarantee that every future run will reason about a warning this well. "Wired" and "reasons about it well" are different claims.
+**Precisely, not overclaimed:** this confirms the data *reaches* Gemini and that the mechanism functions end-to-end on 3 real runs — it isn't a guarantee that every future run will reason about a warning this well. "Wired" and "reasons about it well" are different claims.
 
 ### The `max_iter`-vs-`C` confound, isolated (2026-07-29)
 
@@ -608,6 +850,9 @@ The isolation run's `ConvergenceWarning` still fired (expected — `max_iter` wa
 This is a genuine causal-isolation finding, not just an observed correlation — a controlled, single-variable follow-up, in the same spirit this project treats as most valuable for its data-science content (see "Data Science Notes" in `DATA_SCIENCE_ANALYSIS.md`). A natural further extension — sweeping `C` across several values (e.g. `1.0, 0.5, 0.1, 0.01`) with `max_iter` held constant, to characterize the shape of the relationship rather than just its direction — is noted as a low-priority future addition; see "Roadmap context."
 
 ---
+
+> **Problem, briefly:** three `RandomForest` runs with different hyperparameters produced suspiciously identical results — until a fourth run, same hyperparameters as the first, produced a *different* result.
+> **Thread:** this section traces and fixes the real bug (`random_state` never threaded into the estimator); a cleaner, condensed account is in [TN Part 6](./TECHNICAL_NOTES.md#part-6-results-file-renaming-compare-subcommand-and-the-reproducibility-fix-2026-07-29)/[DS §12](./DATA_SCIENCE_ANALYSIS.md#12-update-2026-07-29-the-max_iter-vs-c-confound-resolved-117s-anomaly-explained-and-new-breast-cancer-results).
 
 ## Reproducibility: seeding every estimator (2026-07-29)
 
@@ -713,6 +958,9 @@ Without a check, a hallucinated `model_type`, or a `hyperparameters` value outsi
 The schema's numeric `"range": [min, max]` field is project-specific, not a real JSON Schema keyword — nothing stated whether boundary values themselves were meant to be valid. Resolved by adding an explicit inclusive-bounds convention statement to `list_available_models()`'s docstring; `validate_hyperparameters` uses inclusive bounds (`low <= value <= high`) matching it.
 
 ---
+
+> **Problem, briefly:** early runs showed the agent trading recall away for other metrics, because nothing in its prompt ever stated which metric actually mattered.
+> **Thread:** this section wires the fix; a cleaner, condensed account is in [TN Part 2](./TECHNICAL_NOTES.md#part-2-orchestration-loop-wiring--implementation-details-2026-07-17)/[DS §8](./DATA_SCIENCE_ANALYSIS.md#8-update-2026-07-17-the-optimization-target-fix-tested-for-the-first-time-against-a-live-agent).
 
 ## `agent.py` — wiring the dispatch table
 
@@ -946,6 +1194,8 @@ Confirmed working end-to-end across both datasets: interactive dataset/target pr
 
 `ml_agent/` is a real installed package — imports elsewhere use `from ml_agent.tools import ...`, `from ml_agent.dataset import ...`, etc., never bare top-level module names.
 
+_For the current, non-annotated version of this tree, see [README §Project Structure](../README.md#project-structure)._
+
 ### Why `agent.py` and `gemini_client.py` are separate
 `gemini_client.py` only knows how to talk to Gemini and dispatch function calls. `agent.py` owns the actual multi-step state — what's been tried, results so far, whether to keep iterating. This separation allows convergence logic to be unit-tested without a live API call.
 
@@ -953,8 +1203,7 @@ Confirmed working end-to-end across both datasets: interactive dataset/target pr
 
 ## Datasets
 
-- **Primary: Climate Model Simulation Crashes** (OpenML id 1467). Binary classification — predict whether a given combination of 18 physical parameters (from the POP2 ocean model component of CCSM4) causes a numerical simulation crash. 540 rows, genuinely imbalanced (~91.5% success / 8.5% failure). `pos_label=1` (failure, the rare class).
-- **Fallback: Breast Cancer Wisconsin** (`sklearn.datasets.load_breast_cancer`). Used for fast, network-free debugging. Its positive-class convention (`1 = benign`, the majority class) is the *opposite* sense from Climate Crashes — `pos_label` is established per-dataset, never assumed consistent.
+The two datasets used (Climate Model Simulation Crashes, Breast Cancer Wisconsin) and why each is here are described in [README §Datasets](../README.md#datasets). The registry mechanics behind them:
 
 Datasets are loaded through a small registry (`DATASET_LOADERS`) in `dataset.py`, keyed by short name (`"climate"`, `"breast_cancer"`). Each registry entry is a `DatasetSpec` — a frozen dataclass pairing the loader function with `pos_label` and a human-readable `description`.
 
@@ -968,7 +1217,7 @@ A dedicated accessor, `get_pos_label(name)`, mirrors `load_dataset(name)`'s patt
 
 ## Available models (via `list_available_models`)
 
-Deliberately kept to three model types rather than an exhaustive sklearn zoo — this project's explicit growth area is agentic/tool-calling engineering, not exhaustive model search. All three expose `class_weight: ["balanced", null]`, the single most relevant lever for the recall-optimization framing on Climate Crashes.
+Why only three models is explained in [README §Datasets](../README.md#datasets). All three expose `class_weight: ["balanced", null]`, the single most relevant lever for the recall-optimization framing on Climate Crashes.
 
 | Model | Key hyperparameters |
 |---|---|
@@ -980,27 +1229,11 @@ Deliberately kept to three model types rather than an exhaustive sklearn zoo —
 
 ## Setup
 
-```bash
-git clone git@github.com:MelanieM2/ml-agent.git
-cd ml-agent
-uv sync
-cp .env.example .env   # then fill in your real GEMINI_API_KEY
-```
-
-Dependencies are pinned exactly (`add-bounds = "exact"` in `[tool.uv]`) and restricted to packages no newer than 7 days old at install time (`exclude-newer = "7 days ago"`), as a routine security precaution applied to every project in this series. See `SECURITY.md` for the full policy.
+Install steps are in [README §Quickstart](../README.md#quickstart). Dependency-pinning policy is in [README §Security](../README.md#security) and `SECURITY.md`.
 
 ## Running
 
-```bash
-uv run python main.py
-```
-
-The real, public entry point. Prompts interactively for a dataset and optimization target if not given as flags; everything else defaults sensibly. See `python main.py --help` for the full flag list, or "`main.py` — the CLI entry point" above for the design rationale.
-
-```bash
-uv run python main.py --dataset climate --target recall
-uv run python main.py --dataset breast_cancer --target f1 --no-log-iterations
-```
+Basic run/compare/export/report commands are in [README §Quickstart](../README.md#quickstart). Below: a couple of invocations and notes not covered there.
 
 For a manual, real-API smoke test with hardcoded defaults (the original way this loop was exercised before `main.py` existed):
 
@@ -1008,23 +1241,10 @@ For a manual, real-API smoke test with hardcoded defaults (the original way this
 uv run python run_smoke_test.py
 ```
 
-To compare several already-completed runs sitting in `results/` (one dataset at a time — see "Cross-run comparison" above):
-
-```bash
-uv run python main.py compare --dataset climate
-```
-
 The standalone module invocation now requires a dataset too (resolved 2026-08-01 — see "Cross-run comparison" above):
 
 ```bash
 uv run python -m ml_agent.compare_runs climate
-```
-
-To export several runs as a spreadsheet, or render a single run or comparison file as a human-readable Markdown report (see "Results reporting" above):
-
-```bash
-uv run python main.py export --dataset climate
-uv run python main.py report results/result_log_2026_07_27_223458_climate.json
 ```
 
 ## Testing
@@ -1043,7 +1263,7 @@ Network-dependent behavior (the Climate Crashes OpenML fetch) is not exercised d
 
 ## Security
 
-See [`SECURITY.md`](./SECURITY.md) for the full policy (dependency pinning, vulnerability scanning, lockfile verification, API key handling, and the LLM-generated-tool-call guard specific to this project).
+Summary in [README §Security](../README.md#security); full policy in [`SECURITY.md`](./SECURITY.md).
 
 ---
 
@@ -1082,6 +1302,8 @@ Project 5 of a 10-step learning roadmap: Linux → Git → Professional Python �
     - `main.py`'s `export`/`report` CLI wiring (argument parsing, interactive-prompt fallback, file-write side effects) has no automated test coverage yet (flagged 2026-08-01) — only the `reporting.py`/`compare_runs.py` logic it calls does. Would need `tmp_path`, `pytest-mock`'s `mocker`, and `capsys`.
     - Housekeeping (flagged 2026-08-01): the pre-2026-07-29 `result_log_*.json` files (no `config` block, fall back to the old last-evaluated heuristic, show `?` for dataset/target in reports) are planned for eventual deletion once no longer needed for reference — not done yet.
     - The two original 07-13 `run_agent_loop` judgment calls (single-call-per-turn; convergence result not echoed on stop) — still untouched, still deliberately deferred.
+
+> **Why this section exists at this length:** the human-in-the-loop hook was scoped back in 2026-07-19, then merged with two other separate ideas (an `Agent-decisions.md` generator, and using Gemini to adjudicate a `final_model_ambiguous` flag) into one coherent design — explored in real depth, but never built. `README.md`'s Roadmap only has a single line pointing here; this is the only place the actual design lives. Two modes: **live** (pauses training synchronously on a known signal, resumes after human input) and **post-hoc** (a Gemini-assisted explanation for a run flagged after it finishes, not during). One piece is still genuinely open: a precise definition of "flagged," beyond the one concrete criterion (`final_model_ambiguous`) that already exists.
 
 ### Human-in-the-loop design (explored 2026-08-03, implementation deferred)
 
@@ -1154,7 +1376,7 @@ Reusing `tools.py`'s `TOOL_FUNCTIONS` mapping for 3 of the dispatch table's 5 en
 
 ### CLI entry point and threshold-revisiting notes (2026-07-27 session)
 
-Building `main.py` surfaced a distinction worth stating plainly, since it's easy to conflate: an unvalidated `optimization_target` string reaching Gemini's prompt unchecked is an **input-validation gap** (a typo or invented metric silently has no connection to what the tool results can support) — not **prompt injection** (which specifically means malicious instructions smuggled into content the model processes, hijacking it against its own instructions). The fix for the former (constrain to a known set) is a normal input-validation measure, not a security control against the latter; worth being precise about which problem a given safeguard actually addresses.
+Building `main.py` surfaced a distinction easy to conflate: an unvalidated `optimization_target` string reaching Gemini's prompt unchecked is an **input-validation gap** (a typo or invented metric silently has no connection to what the tool results can support) — not **prompt injection** (which specifically means malicious instructions smuggled into content the model processes, hijacking it against its own instructions). The fix for the former (constrain to a known set) is a normal input-validation measure, not a security control against the latter — know which problem a given safeguard actually addresses.
 
 Separately, this session closed an open decision (`MAX_ITERATIONS`, 10 → 15) using a criterion worth naming explicitly for future similar cases: a debugging-safety-net value should be revisited once its own stated condition is met by real evidence, not left in place indefinitely just because it was never causing visible errors. Here, the cap wasn't failing loudly — it was silently truncating legitimate in-progress agent reasoning, a quieter failure mode that only became visible by actually reading what a real run's tool-call sequence was doing when it got cut off. Full rationale in `TECHNICAL_NOTES.md` Part 5, §5.9.
 
@@ -1162,7 +1384,7 @@ Separately, this session closed an open decision (`MAX_ITERATIONS`, 10 → 15) u
 
 Two Breast Cancer runs looking identical, followed by a third with matching hyperparameters producing a *different* result, is the kind of anomaly that's easy to wave away as noise if it isn't actually chased down. It wasn't: checked directly against `trainer.py`'s real code rather than assumed, this turned out to be a genuine bug (`RandomForestClassifier` never received a `random_state`, see "Reproducibility: seeding every estimator" above) rather than a fluke — a reminder that an *apparent* pattern across a small number of runs (three matching results) can still be coincidence, and the anomaly that breaks the pattern is sometimes more informative than the pattern itself.
 
-A related terminology correction, worth stating plainly rather than quietly fixing: an earlier write-up of the `max_iter`-vs-`C` confound (2026-07-27) described the confounded runs as reaching "a better precision." Re-checking the actual numbers this session showed precision never moved at all across any of the relevant runs — the metric that changed was recall. The distinction matters beyond wording: `max_iter` and `C` do fundamentally different things (solver iteration cap vs. regularization strength), and getting the metric right is part of getting the causal claim right, not a cosmetic detail.
+A related terminology correction, made explicitly rather than fixed quietly: an earlier write-up of the `max_iter`-vs-`C` confound (2026-07-27) described the confounded runs as reaching "a better precision." Re-checking the actual numbers this session showed precision never moved at all across any of the relevant runs — the metric that changed was recall. The distinction matters beyond wording: `max_iter` and `C` do fundamentally different things (solver iteration cap vs. regularization strength), and getting the metric right is part of getting the causal claim right, not a cosmetic detail.
 
 The results-file naming change (`smoke_test_log_<timestamp>.json` → `result_log_<timestamp>_<dataset_name>.json`) surfaced a design fork worth documenting: placing `dataset_name` *before* the timestamp (`result_log_<dataset_name>_<timestamp>.json`) was the initially-proposed convention, but would have broken `compare_runs.py`'s existing assumption that a whole-filename string sort produces chronological order — all of one dataset's runs would sort before all of another's, regardless of when they actually ran. Checking a downstream consumer's assumptions before finalizing an upstream naming change caught this before it shipped, rather than after.
 
@@ -1178,4 +1400,4 @@ A smaller, purely process-level finding worth naming directly: a mitigation desc
 
 ### Test design and empirical verification notes (2026-08-03 session)
 
-Building `test_trainer.py`'s `ConvergenceWarning` test surfaced a lesson worth stating plainly, since it's the kind of mistake that's easy to repeat: a *plausible-sounding* mechanism for a numerical result isn't the same as a *verified* one, even when the reasoning sounds like it should be right. Two consecutive hypotheses — that uniform feature scaling would slow `lbfgs` convergence, and separately, that near-perfect linear separability would prevent it from converging at all — both sounded like reasonable applications of real optimization theory, and both failed the moment they were actually run. The theory wasn't exactly *wrong* in either case; each simply missed a detail that only running the code surfaced (uniform scaling doesn't touch relative feature conditioning; `lbfgs`'s gradient-norm stopping rule can be satisfied well before a theoretically-unreachable optimum matters in practice). The fix, in both the debugging process and the practice this encourages generally: when a numerical claim can actually be checked by running code, check it — don't ship a second theoretical guess without running it first, however confident it sounds. See "Reproducibility: seeding every estimator" → "Test coverage" above for the full three-attempt account, and `TECHNICAL_NOTES.md` Part 8 for the exact commands and numbers from each attempt.
+Building `test_trainer.py`'s `ConvergenceWarning` test surfaced a lesson easy to repeat if unstated: a *plausible-sounding* mechanism for a numerical result isn't the same as a *verified* one, even when the reasoning sounds like it should be right. Two consecutive hypotheses — that uniform feature scaling would slow `lbfgs` convergence, and separately, that near-perfect linear separability would prevent it from converging at all — both sounded like reasonable applications of real optimization theory, and both failed the moment they were actually run. The theory wasn't exactly *wrong* in either case; each simply missed a detail that only running the code surfaced (uniform scaling doesn't touch relative feature conditioning; `lbfgs`'s gradient-norm stopping rule can be satisfied well before a theoretically-unreachable optimum matters in practice). The fix, in both the debugging process and the practice this encourages generally: when a numerical claim can actually be checked by running code, check it — don't ship a second theoretical guess without running it first, however confident it sounds. See "Reproducibility: seeding every estimator" → "Test coverage" above for the full three-attempt account, and `TECHNICAL_NOTES.md` Part 8 for the exact commands and numbers from each attempt.
