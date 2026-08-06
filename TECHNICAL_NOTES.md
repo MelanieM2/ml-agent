@@ -2,6 +2,8 @@
 
 _Companion to [`DATA_SCIENCE_ANALYSIS.md`](./DATA_SCIENCE_ANALYSIS.md) — this file covers implementation decisions; that one covers methodology and findings. Most working sessions touched both, on the same date, about the same piece of work — see the session map below._
 
+**How to read this file.** This is a chronological development log, not a polished reference — each Part reflects what was actually built and decided on that date, including assumptions that later turned out to be wrong, corrected explicitly in place in a later Part rather than edited away. If you're skimming: the status index below tells you what each Part covers and whether it was later revisited; a short "Problem, briefly" box sits at the start of each Part that continues a multi-session thread, summarizing what was wrong before the implementation detail begins. For the short version of this project, see `README.md` — this file is the full implementation trail behind it.
+
 ---
 
 ## Session map: how this file lines up with `DATA_SCIENCE_ANALYSIS.md`
@@ -321,6 +323,9 @@ Summary for the same date.
 
 ---
 
+> **Problem, briefly:** early runs showed the agent trading recall away for other metrics, because nothing in its prompt ever stated which metric actually mattered — see [DS §4](./DATA_SCIENCE_ANALYSIS.md#4-finding-the-missing-optimization-target-is-a-real-observed-problem--not-just-a-theoretical-gap).
+> **Thread:** this Part implements and wires the fix; tested live against a real agent in [DS §8](./DATA_SCIENCE_ANALYSIS.md#8-update-2026-07-17-the-optimization-target-fix-tested-for-the-first-time-against-a-live-agent), reconfirmed in DS §9-§10.
+
 ## Part 2: Orchestration-loop wiring — implementation details (2026-07-17)
 
 _Status: IMPLEMENTED and verified via 3 live runs (see
@@ -396,7 +401,7 @@ same mapping") and removes a small drift risk: if a 6th, unbound tool were
 ever added to `tools.py`, it would be picked up here automatically via the
 dict spread, with no second place in `agent.py` to remember to update.
 
-**Risk, flagged rather than silently accepted:** if `train_model` or
+**Risk:** if `train_model` or
 `evaluate_model` were ever renamed in `tools.py`, these two override lines
 would silently stop overriding anything — the stale, `NotImplementedError`
 -raising version from `TOOL_FUNCTIONS` would quietly take their place,
@@ -804,7 +809,7 @@ This was a deliberate scope choice: an earlier option considered adding
 available to every future caller automatically. Melanie chose the
 simpler, narrower option instead — this is manual-testing
 instrumentation, not part of `run_session`/`run_agent_loop`'s committed
-API surface. A consequence worth stating plainly: a future caller (e.g.
+API surface. A consequence: a future caller (e.g.
 `main.py`) that wants timing will need its own separate wrap; nothing
 upstream provides it automatically.
 
@@ -929,6 +934,9 @@ TECHNICAL_NOTES.md ADDITION — 2026-07-27 session
 -->
 
 ---
+> **Problem, briefly:** `LogisticRegression` kept emitting a `ConvergenceWarning` across runs — flagged as an open, unresolved question in [§4.5](#45-known-limitations-not-fixed-this-session) of this file and in [DS §6](./DATA_SCIENCE_ANALYSIS.md#6-secondary-finding-logisticregressions-convergence-warning-is-systematic-not-incidental), with no evidence yet on whether it was a real correctness issue.
+> **Thread:** this Part exposes `max_iter` as a tunable hyperparameter and tests the fix against 3 live runs — see [DS §11](./DATA_SCIENCE_ANALYSIS.md#11-update-2026-07-27-max_iter-exposed-as-a-tunable-hyperparameter--the-convergencewarning-shortlist-decision-tested-against-3-live-runs).
+
 ## Part 5: `max_iter` exposed as a hyperparameter; confirming the agent-reasoning pathway was already wired (2026-07-27)
 
 _Status: IMPLEMENTED and verified via 3 live runs (see
@@ -1166,6 +1174,9 @@ complete cycle.
 
 ---
 
+> **Problem, briefly:** three `RandomForest` runs with different hyperparameters produced suspiciously identical results — until a fourth run, same hyperparameters as the first, produced a *different* result, contradicting a "fixed seed" explanation. See [DS §11.7](./DATA_SCIENCE_ANALYSIS.md#117-secondary-observation-flagged-as-curious-not-explained).
+> **Thread:** this Part traces and fixes the real bug behind it — `random_state` had never actually been threaded into the estimator — see [DS §12.2-§12.3](./DATA_SCIENCE_ANALYSIS.md#122-the-isolation-run).
+
 ## Part 6: Results-file renaming, `compare` subcommand, and the reproducibility fix (2026-07-29)
 
 _Status: IMPLEMENTED and verified — renamed files/dataset filtering confirmed against 12 Climate Crashes and 4 Breast Cancer runs; the reproducibility fix confirmed against 2 post-fix Breast Cancer runs. Live-run data-science findings from this session (the `max_iter`-vs-`C` isolation, the Random Forest anomaly's root cause) are in `DATA_SCIENCE_ANALYSIS.md` §12, not duplicated here — this Part covers implementation only._
@@ -1189,7 +1200,7 @@ result_log_2026_07_29_231134_breast_cancer.json
 
 A one-time script, deliberately **not** part of the `ml_agent` package — a throwaway migration helper, not project code, gitignored, safe to delete once run. Renames every `results/smoke_test_log_*.json` file to the new convention.
 
-**One judgment call built into it, flagged rather than silently resolved:** files written by the old `run_smoke_test.py` never stored a `config.dataset` field at all (that field was introduced later, by `main.py`). Since `run_smoke_test.py` hardcodes the `climate` dataset, the script falls back to `"climate"` for any file missing that field — but this is an *inference*, not something read from the file itself, and every such case is printed with an explicit `(INFERRED ...)` tag so it can be checked by hand before trusting it. Files written by the new `main.py` already carry `config.dataset` and never need the fallback.
+**Judgment call:** files written by the old `run_smoke_test.py` never stored a `config.dataset` field at all (that field was introduced later, by `main.py`). Since `run_smoke_test.py` hardcodes the `climate` dataset, the script falls back to `"climate"` for any file missing that field — but this is an *inference*, not something read from the file itself, and every such case is printed with an explicit `(INFERRED ...)` tag so it can be checked by hand before trusting it. Files written by the new `main.py` already carry `config.dataset` and never need the fallback.
 
 Supports `--dry-run` (prints the planned renames without touching anything) and `--results-dir` (defaults to `results/`). Verified against a real migration: all pre-existing files renamed correctly, confirmed via `git status` showing no unexpected changes and `compare_runs.py` correctly picking up the renamed files afterward.
 
@@ -1291,6 +1302,9 @@ Five commits, ordered so each leaves the repo in a working state (foundation-bef
 4. `trainer.py` + `agent.py` together, as one commit (the reproducibility fix — neither half does anything alone; splitting them would leave an intermediate commit where the feature is only half-wired)
 
 Deliberately grouped at file level with multi-bullet commit messages, rather than fully atomic per-change commits via `git add -p` — several distinct changes landed in overlapping regions of the same functions this session (e.g. `main.py`'s `main()`), making hunk-level splitting more fiddly than it was worth for a solo-author, not-yet-public project at this stage.
+
+> **Problem, briefly:** a heuristic assuming "last evaluated model = final model" was quietly wrong on a real run — the model the agent actually chose, by its own reasoning, wasn't the last one it had evaluated. See [DS §13](./DATA_SCIENCE_ANALYSIS.md#13-update-2026-08-01-summarize_runs-final-model-resolution-corrected--a-real-breast_cancer-runs-reported-outcome-was-wrong).
+> **Thread:** this Part fixes it, alongside `reporting.py` and an unrelated pytest collection bug; [Part 8](#part-8-teststest_trainerpy--reproducibility-test-coverage-and-an-empirical-debugging-chain-2026-08-03-session) adds test coverage for the fix later.
 
 ## Part 7: Results reporting (`reporting.py`), a real final-model bug fix, and a pytest collection bug (2026-08-01)
 
@@ -1525,7 +1539,7 @@ Melanie ran the corrected version: **17/17 passing.**
 
 **The actual mechanism, and why it's genuinely different from Attempt 1:** it's not feature scale itself that matters, it's the *mismatch* between features' scales on the same problem. `lbfgs`'s quasi-Newton curvature approximation assumes roughly comparable scales across dimensions to build a useful estimate of the objective's local curvature; wildly different per-feature scales distort that estimate directly, slowing convergence in a way uniform scaling structurally cannot. This is also, not incidentally, the standard real-world justification for standardizing features before fitting linear models — this test's fixture is a working demonstration of that justification, not just an artificial way to force a warning.
 
-**Process lesson, worth stating for its own sake:** Attempts 1 and 2 were both individually reasonable applications of real optimization theory, and both were shipped as untested guesses rather than verified first — a real gap in following "verification over assertion" consistently, caught only because Melanie was actually running the code and reporting back honestly rather than assuming success. Attempt 3 was found and confirmed *before* being handed over, using the same sandboxed execution capability that could have caught Attempts 1 and 2's flaws earlier. Standing practice going forward (see the 2026-08-03 extension to "Verification Over Assertion" in the context file): when a numerical/technical claim can actually be checked by running code, check it before proposing it, not after it fails on someone else's machine.
+**Process lesson:** Attempts 1 and 2 were both individually reasonable applications of real optimization theory, and both were shipped as untested guesses rather than verified first — a real gap in following "verification over assertion" consistently, caught only because Melanie was actually running the code and reporting back honestly rather than assuming success. Attempt 3 was found and confirmed *before* being handed over, using the same sandboxed execution capability that could have caught Attempts 1 and 2's flaws earlier. Standing practice going forward (see the 2026-08-03 extension to "Verification Over Assertion" in the context file): when a numerical/technical claim can actually be checked by running code, check it before proposing it, not after it fails on someone else's machine.
 
 ### 8.4 `numpy` added as a dev dependency
 
