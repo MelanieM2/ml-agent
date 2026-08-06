@@ -2,6 +2,8 @@
 
 _Companion to [`TECHNICAL_NOTES.md`](./TECHNICAL_NOTES.md) — this file covers methodology and findings; that one covers implementation decisions. Most working sessions touched both, on the same date, about the same piece of work — see the session map below._
 
+**How to read this file.** This is a chronological analysis log, not a polished reference — each section reflects what was actually observed and understood on that date, including readings that later turned out to be incomplete or wrong, corrected explicitly in place in a later section rather than edited away. If you're skimming: the status index below tells you what each section covers and whether it was later revisited; a short "Problem, briefly" box sits at the start of each major multi-section thread, summarizing what was wrong before the chronological detail begins. For the short version of this project, see `README.md` — this file is the full trail of evidence behind it.
+
 ---
 
 ## Session map: how this file lines up with `TECHNICAL_NOTES.md`
@@ -42,6 +44,7 @@ Part 8   2026-08-03  test_trainer.py, 17 tests     ─ ─ ▶ §13  (cross-refe
 ---
 
 ## Table of contents
+
 <details>
 <summary><a href="#1-the-dataset-asymmetry-this-analysis-depends-on">1. The dataset asymmetry this analysis depends on</a></summary>
 </details>
@@ -55,23 +58,20 @@ Part 8   2026-08-03  test_trainer.py, 17 tests     ─ ─ ▶ §13  (cross-refe
 </details>
 
 <details>
-<summary><a href="#4-finding-the-missing-optimization-target-is-a-real,-observed-problem-—-not-just-a-theoretical-gap">4. Finding: the missing optimization target is a real, observed problem — not just a theoretical gap</a></summary>
+<summary><a href="#4-finding-the-missing-optimization-target-is-a-real-observed-problem--not-just-a-theoretical-gap">4. Finding: the missing optimization target is a real, observed problem — not just a theoretical gap</a></summary>
 </details>
 
 <details>
-<summary><a href="#5-finding-non-determinism-is-real,-but-may-be-partly-a-budget-artifact,-not-pure-randomness">5. Finding: non-determinism is real, but may be partly a budget artifact, not pure randomness</a></summary>
+<summary><a href="#5-finding-non-determinism-is-real-but-may-be-partly-a-budget-artifact-not-pure-randomness">5. Finding: non-determinism is real, but may be partly a budget artifact, not pure randomness</a></summary>
 </details>
 
 <details>
-<summary><a href="#6-secondary-finding-logisticregressions-convergence-warning-is-systematic,-not-incidental">6. Secondary finding: `LogisticRegression`'s convergence warning is systematic, not incidental</a></summary>
+<summary><a href="#6-secondary-finding-logisticregressions-convergence-warning-is-systematic-not-incidental">6. Secondary finding: `LogisticRegression`'s convergence warning is systematic, not incidental</a></summary>
 </details>
 
 <details>
 <summary><a href="#7-summary-as-of-2026-07-13">7. Summary (as of 2026-07-13)</a></summary>
 </details>
-
-
-
 
 <details>
 <summary><a href="#8-update-2026-07-17-the-optimization-target-fix-tested-for-the-first-time-against-a-live-agent">8. Update, 2026-07-17: the optimization-target fix, tested for the first time against a live agent</a></summary>
@@ -85,10 +85,6 @@ Part 8   2026-08-03  test_trainer.py, 17 tests     ─ ─ ▶ §13  (cross-refe
 
 </details>
 
-<!-- -->
-
-<!-- -->
-
 <details>
 <summary><a href="#9-update-2026-07-19-per-iteration-logging--first-look-inside-a-runs-actual-search-path">9. Update, 2026-07-19: per-iteration logging — first look inside a run's actual search path</a></summary>
 
@@ -99,10 +95,6 @@ Part 8   2026-08-03  test_trainer.py, 17 tests     ─ ─ ▶ §13  (cross-refe
 - [9.5 Updated summary table](#95-updated-summary-table)
 
 </details>
-
-<!-- -->
-
-<!-- -->
 
 <details>
 <summary><a href="#10-update-2026-07-24-cross-run-comparison-goes-live--the-8493-question-finally-has-real-data-behind-it">10. Update, 2026-07-24: cross-run comparison goes live — the §8.4/§9.3 question finally has real data behind it</a></summary>
@@ -115,10 +107,6 @@ Part 8   2026-08-03  test_trainer.py, 17 tests     ─ ─ ▶ §13  (cross-refe
 - [10.6 Updated summary table](#106-updated-summary-table)
 
 </details>
-
-<!-- -->
-
-<!-- -->
 
 <details>
 <summary><a href="#11-update-2026-07-27-max_iter-exposed-as-a-tunable-hyperparameter--the-convergencewarning-shortlist-decision-tested-against-3-live-runs">11. Update, 2026-07-27: `max_iter` exposed as a tunable hyperparameter — the ConvergenceWarning shortlist decision, tested against 3 live runs</a></summary>
@@ -134,10 +122,6 @@ Part 8   2026-08-03  test_trainer.py, 17 tests     ─ ─ ▶ §13  (cross-refe
 
 </details>
 
-<!-- -->
-
-<!-- -->
-
 <details>
 <summary><a href="#12-update-2026-07-29-the-max_iter-vs-c-confound-resolved-117s-anomaly-explained-and-new-breast-cancer-results">12. Update, 2026-07-29: the `max_iter`-vs-`C` confound resolved, §11.7's anomaly explained, and new Breast Cancer results</a></summary>
 
@@ -149,10 +133,6 @@ Part 8   2026-08-03  test_trainer.py, 17 tests     ─ ─ ▶ §13  (cross-refe
 
 </details>
 
-<!-- -->
-
-<!-- -->
-
 <details>
 <summary><a href="#13-update-2026-08-01-summarize_runs-final-model-resolution-corrected--a-real-breast_cancer-runs-reported-outcome-was-wrong">13. Update, 2026-08-01: `summarize_run`'s final-model resolution corrected — a real breast_cancer run's reported outcome was wrong</a></summary>
 
@@ -163,8 +143,6 @@ Part 8   2026-08-03  test_trainer.py, 17 tests     ─ ─ ▶ §13  (cross-refe
 - [13.5 Summary table](#135-summary-table)
 
 </details>
-
-<!-- -->
 
 ---
 
@@ -242,6 +220,9 @@ problem in feature space, while Climate Crashes' extreme class imbalance
 question — reflected directly in how much longer and more variably the
 agent had to reason about it.
 
+> **Problem, briefly:** early runs showed the agent trading recall away for other metrics — even on a dataset where missing a rare failure case is the costlier mistake — because nothing in its prompt ever stated which metric actually mattered.
+> **Thread:** identified here in §4 → fixed and tested live in [TN Part 2](./TECHNICAL_NOTES.md#part-2-orchestration-loop-wiring--implementation-details-2026-07-17)/§8 → reconfirmed in §9 and §10.
+
 ## 4. Finding: the missing optimization target is a real, observed problem — not just a theoretical gap
 
 Across every Climate run where a choice had to be made between models, the
@@ -301,6 +282,9 @@ this** — it's flagged here as an open question for future investigation
 (e.g. running several more Climate trials at `max_iterations=15` or higher
 to see how often convergence happens past iteration 10), not resolved by
 this session's data.
+
+> **Problem, briefly:** `LogisticRegression` kept emitting a `ConvergenceWarning` across runs — an open question of whether this was a real correctness issue, or just noise from a `max_iter` cap that happened to be fixed too low.
+> **Thread:** flagged here in §6 (and as an open limitation in [TN Part 4 §4.5](./TECHNICAL_NOTES.md#45-known-limitations-not-fixed-this-session)) → `max_iter` exposed as a tunable hyperparameter and tested live in [TN Part 5](./TECHNICAL_NOTES.md#part-5-max_iter-exposed-as-a-hyperparameter-confirming-the-agent-reasoning-pathway-was-already-wired-2026-07-27)/§11.
 
 ## 6. Secondary finding: `LogisticRegression`'s convergence warning is systematic, not incidental
 
@@ -625,9 +609,9 @@ file-write step. No trace of that attempt exists in `results/`, and
 `compare_runs.py` has no way to know it happened at all; it can only
 ever summarize runs that completed and wrote a file. This is accepted as
 a known limitation for now (see `TECHNICAL_NOTES.md` Part 4), not a
-data-quality problem with the comparison above — but worth stating
-explicitly, since "6 of 7 attempts" and "6 of 6 known runs" are not the
-same claim, and only the second is what §10.1's table actually shows.
+data-quality problem with the comparison above. "6 of 7 attempts" and
+"6 of 6 known runs" are not the same claim, and only the second is what
+§10.1's table actually shows.
 
 ### 10.6 Updated summary table
 
@@ -718,8 +702,8 @@ end-to-end, not just that the plumbing was theoretically capable of it.
 ### 11.5 Finding: Run A isolates `max_iter`'s own effect cleanly; Runs B/C confound it with `C`
 
 Run A is the only one of the three where the retry changed **only**
-`max_iter`, leaving every other hyperparameter unchanged. Its result is
-worth stating plainly: raising `max_iter` from 100 to 500 silenced the
+`max_iter`, leaving every other hyperparameter unchanged: raising
+`max_iter` from 100 to 500 silenced the
 warning **completely**, while leaving every reported metric — accuracy,
 precision, recall, F1, and the full confusion matrix — bit-identical to
 the pre-retry attempt. In this run, the iteration cap was a *reporting*
@@ -753,6 +737,9 @@ specifically by exposing `max_iter` (and, per §11.5, plausibly `C`
 alongside it) — a configuration that was structurally unreachable
 before this session, since `max_iter` did not previously exist as
 something the agent could choose.
+
+> **Problem, briefly:** three `RandomForest` runs with different hyperparameters produced suspiciously identical results — until a fourth run, same hyperparameters as the first, produced a *different* result, contradicting the "fixed seed" explanation.
+> **Thread:** the contradiction is flagged here in §11.7 → traced to a real bug in §12.2-§12.3 and [TN Part 6](./TECHNICAL_NOTES.md#part-6-results-file-renaming-compare-subcommand-and-the-reproducibility-fix-2026-07-29) — `random_state` had never actually been threaded into the estimator.
 
 ### 11.7 Secondary observation, flagged as curious, not explained
 
@@ -815,7 +802,7 @@ Checked directly against `trainer.py`'s real code (not inferred): every estimato
 
 **Fixed this session:** `random_state` is now threaded into every estimator's constructor, reusing the same value already used for the train/test split (see `README.md`'s "Reproducibility: seeding every estimator" and `TECHNICAL_NOTES.md` Part 6 for the implementation). Verified directly: two post-fix Breast Cancer runs, same seed, different Random Forest hyperparameter combinations, now produce identical results to each other — the specific behavior the fix targets.
 
-**Worth being precise about what this changes methodologically:** every Random Forest result reported earlier in this document (§2, §8–§11) was generated *before* this fix, under sklearn's unseeded default. Those figures remain accurate records of what those specific runs produced, but should not be read as necessarily reproducible if re-run today — a real, if narrow, caveat on this document's own earlier Random Forest figures.
+**What this changes methodologically:** every Random Forest result reported earlier in this document (§2, §8–§11) was generated *before* this fix, under sklearn's unseeded default. Those figures remain accurate records of what those specific runs produced, but should not be read as necessarily reproducible if re-run today — a real, if narrow, caveat on this document's own earlier Random Forest figures.
 
 ### 12.4 New results: Breast Cancer across all three model types, post-fix
 
@@ -843,6 +830,9 @@ The linear-kernel SVM result (Run 1) is a genuinely new data point for this proj
 <!--
 DATA_SCIENCE_ANALYSIS.md update — 2026-08-01 session
 -->
+
+> **Problem, briefly:** a heuristic assuming "last evaluated model = final model" was quietly wrong on a real run — the model the agent actually chose, by its own reasoning, wasn't the last one it had evaluated.
+> **Thread:** found and fixed here in §13 and [TN Part 7](./TECHNICAL_NOTES.md#part-7-results-reporting-reportingpy-a-real-final-model-bug-fix-and-a-pytest-collection-bug-2026-08-01); [TN Part 8](./TECHNICAL_NOTES.md#part-8-teststest_trainerpy--reproducibility-test-coverage-and-an-empirical-debugging-chain-2026-08-03-session) adds test coverage for the fix, without a new section of its own here.
 
 ## 13. Update, 2026-08-01: `summarize_run`'s final-model resolution corrected — a real breast_cancer run's reported outcome was wrong
 
