@@ -354,12 +354,9 @@ prompt text changed.
 All three runs also report **low precision**, and the agent's own
 reasoning acknowledges this without really interrogating it — e.g. run 3's
 reasoning states *"this is expected given the extreme imbalance and the
-focus on recall"* and treats that as sufficient justification. With
-`class_weight="balanced"` and a very small rare-class test set (9 examples,
-per `validate_split`'s threshold-of-5 reasoning — see `README.md`
-"Statistical rationale"), a model can sometimes reach perfect recall simply
-by predicting the positive class liberally, catching every real case at
-the cost of many false alarms. Whether "recall at any precision cost" is
+focus on recall"* and treats that as sufficient justification. 
+With class_weight="balanced" and a very small rare-class test set (9 examples — validate_split enforces a minimum of 5 examples of the rare class in the test split), a model can sometimes reach perfect recall simply by predicting the positive class liberally, catching every real case at the cost of many false alarms.
+Whether "recall at any precision cost" is
 actually the *right* trade-off for this problem is a human judgment call,
 not something the current setup asks the agent to weigh — the fix
 successfully made the agent optimize for exactly what was asked, but
