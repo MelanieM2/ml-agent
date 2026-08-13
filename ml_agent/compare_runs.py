@@ -2,46 +2,33 @@
 # files into one comparison file, so multiple agent runs can be looked
 # at side by side instead of one file at a time.
 #
-# Added 2026-07-24, part of item 2 on the running TODO list -- the
-# ORIGINAL motivating question ("why did one run converge faster with
-# no ConvergenceWarning than another") needed multiple runs' logs
-# persisted and compared side by side, which wasn't possible before
-# that session's timestamped-filename change to run_smoke_test.py
-# (previously results/smoke_test_log.json was overwritten every run,
-# so only ever one run's data existed at a time).
+# Each run file is scoped to a single dataset, encoded in its filename
+# (result_log_<timestamp>_<dataset_name>.json). Comparing runs across
+# different datasets is never allowed anywhere in this project's CLI
+# surface, since accuracy/precision/recall/f1 aren't comparable across
+# different data -- build_comparison enforces this via its optional
+# dataset_name filter, and every real caller (main.py's compare/export
+# subcommands, and this file's own standalone entry point below)
+# always passes one explicitly.
 #
-# Filename prefix updated 2026-07-29: smoke_test_log_<timestamp>.json
-# -> result_log_<timestamp>_<dataset_name>.json (confirmed with
-# Melanie). glob pattern below updated to match. See rename_results.py
-# for the one-time migration of pre-existing files in results/.
-#
-# summarize_run() extended 2026-07-31 (part 1): added final_hyperparameters
-# and dataset/target/random_state, pulled from config -- see that
-# session's notes for why.
-#
-# summarize_run() extended 2026-07-31 (part 2) -- REAL BUG FOUND AND
-# FIXED: the "last evaluate_model in the log = the final model"
-# heuristic was demonstrably wrong on a real file
-# (result_log_2026_07_29_232959_breast_cancer.json) -- Gemini evaluated
-# random_forest LAST purely as a comparison point, then its own
-# convergence reasoning named an EARLIER logistic_regression evaluation
-# (recall 0.9722) as the actual chosen model. Fixed by resolving the
-# final model as whichever evaluated model scores highest on
-# config["target"]'s metric (Option A, confirmed with Melanie), not by
-# call order. This is not text-parsing of the free-text reasoning field
-# (too fragile) -- it's a structural, metric-based resolution.
-#
-# Because this heuristic can still, in principle, disagree with what
-# Gemini's reasoning text actually says (rare, but the breast_cancer
-# file is proof it happens), summarize_run() now also flags
-# final_model_ambiguous: True whenever the best-by-target pick differs
-# from the old last-evaluated pick -- a cheap, structural mismatch
-# signal, not an attempt to parse or adjudicate the reasoning itself.
-# Deliberately NOT resolved by a second live Gemini call -- considered
-# and explicitly deferred (2026-07-31): that idea overlaps with the
-# still-undesigned human-in-the-loop hook (item #6) and
-# Agent-decisions.md generator (item #12), and belongs in that future
-# conversation, not bolted onto this module.
+# "Final model" resolution: rather than assuming the last evaluate_model
+# call in a run's log is the model Gemini actually settled on, the final
+# model is resolved structurally -- whichever evaluated model scores
+# highest on the run's own optimization target. A run can legitimately
+# evaluate one extra model purely as a comparison point after already
+# deciding, so call order alone isn't a reliable signal. This is not
+# text-parsing of Gemini's free-text convergence reasoning (considered
+# and rejected as too fragile) -- it's a structural, metric-based
+# resolution. Because it can still, rarely, disagree with what the
+# reasoning text actually says, summarize_run() also flags
+# final_model_ambiguous whenever the best-by-target pick differs from
+# the last-evaluated pick -- a cheap, structural mismatch signal, not an
+# attempt to parse or adjudicate the reasoning itself. A second live
+# Gemini call to adjudicate that disagreement directly was considered
+# and deliberately not built here -- that idea has since been folded
+# into the broader human-in-the-loop design's post-hoc debug-assist mode
+# (designed in some depth, not yet implemented), rather than being a
+# one-off addition to this module.
 
 from __future__ import annotations
 
@@ -52,8 +39,10 @@ from typing import Any
 
 # The same four metrics evaluate_model (trainer.py) computes -- kept
 # here as a local constant rather than importing VALID_TARGETS from
-# main.py, since compare_runs.py must stay import-independent of
-# main.py (see reporting.py's header comment for why).
+# main.py, since compare_runs.py must stay import-independent of both
+# main.py and reporting.py (see reporting.py's header comment for the
+# full rationale: neither of those two should import from this module
+# or from each other).
 KNOWN_METRICS = {"accuracy", "precision", "recall", "f1"}
 
 
@@ -67,16 +56,14 @@ def summarize_run(run_data: dict[str, Any], source_file: str | None = None) -> d
     validate_hyperparameters (trainer.py). Testable with a hand-built
     dict, no real run needed.
 
-    DEFENSIVE ON PURPOSE: this project's results/ folder now contains a
-    genuine mix of file vintages -- runs from before the 2026-07-24
-    session don't have an "elapsed_seconds" key at the top level at
-    all, and their train_model log entries don't have a "warnings" key
-    in their result dict at all. Runs from before 2026-07-29 have no
-    top-level "config" block at all (dataset/target/random_state were
-    not yet persisted there) -- which also means "final model"
-    resolution for those older files falls back to "last evaluated",
-    since there's no target metric to rank by. Every access below uses
-    .get(...) with an explicit default rather than direct indexing.
+    Defensive by necessity: results/ contains a genuine mix of file
+    vintages from before certain fields existed -- some runs have no
+    top-level "elapsed_seconds" key, some train_model log entries have
+    no "warnings" key in their result dict, and some runs predate the
+    top-level "config" block entirely (no dataset/target/random_state
+    ever recorded for them). Every access below uses .get(...) with an
+    explicit default rather than direct indexing, so an older file
+    degrades gracefully instead of raising.
 
     Returns a dict with these keys, always present (None/[]/empty when
     the source run doesn't have the underlying data):
@@ -85,22 +72,22 @@ def summarize_run(run_data: dict[str, Any], source_file: str | None = None) -> d
       final_hyperparameters, final_metrics, final_model_ambiguous,
       warnings_encountered, convergence_reasoning
 
-    final_model resolution (CHANGED 2026-07-31, see module header for
-    the real bug this fixes): every evaluate_model call this run is
+    final_model resolution: every evaluate_model call this run is
     recorded, in order, as {model_ref, model_type, metrics}. If
     config["target"] is a known metric name, the "final" model is
-    whichever evaluated model scores HIGHEST on that metric -- not
-    whichever was evaluated last. If target is missing/unrecognized
-    (older files), falls back to the original "last evaluated" rule
-    unchanged.
+    whichever evaluated model scores HIGHEST on that metric -- see the
+    module header above for why call order alone isn't trusted. If
+    target is missing or unrecognized (older files, from before it was
+    persisted), falls back to "last evaluated" instead, since there's no
+    target metric available to rank by.
 
-    final_model_ambiguous (NEW 2026-07-31): True when target IS known
-    and the best-by-target pick differs from the last-evaluated pick
-    (a real disagreement worth a human's attention -- see
-    reporting.py for how this surfaces in output). False when target
-    is known and the two picks agree. None when target is unknown --
-    there's no second opinion to compare against, so "ambiguous" isn't
-    a meaningful question for those files.
+    final_model_ambiguous: True when target IS known and the
+    best-by-target pick differs from the last-evaluated pick -- a real
+    disagreement worth a human's attention (see reporting.py for how
+    this surfaces in output). False when target is known and the two
+    picks agree. None when target is unknown -- there's no second
+    opinion to compare against, so "ambiguous" isn't a meaningful
+    question for those files.
     """
     log: list[dict[str, Any]] = run_data.get("log", [])
     config = run_data.get("config") or {}
@@ -156,9 +143,9 @@ def summarize_run(run_data: dict[str, Any], source_file: str | None = None) -> d
             })
 
         elif tool_name == "record_convergence_decision":
-            # Last one wins if there are several -- unchanged from
-            # before; a run can call this with continue_iterating=True
-            # more than once before finally stopping.
+            # Last one wins if there are several -- a run can call this
+            # with continue_iterating=True more than once before finally
+            # stopping.
             convergence_reasoning = result.get("reasoning")
 
     # --- Resolve the "final" model -------------------------------------
@@ -213,25 +200,21 @@ def build_comparison(
     summarize_run() row per file.
 
     dataset_name, when given, restricts the scan to
-    result_log_*_<dataset_name>.json only -- confirmed with Melanie
-    2026-07-29: comparing runs across different datasets is never
-    allowed, since their metrics (accuracy/precision/recall/f1) aren't
-    comparable against different data. main.py's `compare` and
-    `export` subcommands always pass an explicit, validated
-    dataset_name and never call this with None.
+    result_log_*_<dataset_name>.json only. Comparing runs across
+    different datasets is never allowed -- their metrics aren't
+    comparable against different data. main.py's compare and export
+    subcommands, and this file's own standalone entry point below,
+    always pass an explicit dataset_name; dataset_name=None stays
+    accepted here so this function itself remains a general-purpose,
+    unopinionated utility rather than enforcing that restriction at this
+    layer.
 
-    dataset_name=None is still ACCEPTED by this function itself (so it
-    stays a general-purpose, unopinionated utility) -- but as of
-    2026-08-01, nothing in this project actually calls it that way
-    anymore. RESOLVED (item #17): the standalone `python -m
-    ml_agent.compare_runs` entry point (see this file's __main__ block)
-    now requires a dataset too, matching main.py's `compare`/`export`
-    subcommands -- comparing runs across datasets is never allowed
-    anywhere in this project's CLI surface.
-
-    Sorted by filename, which still sorts chronologically as-is, since
-    the naming convention is
-    result_log_<YYYY_MM_DD_HHMMSS>_<dataset_name>.json.
+    Sorted by filename, which still sorts chronologically as-is: the
+    naming convention is
+    result_log_<YYYY_MM_DD_HHMMSS>_<dataset_name>.json, with the dataset
+    name deliberately placed after the timestamp, not before -- putting
+    it first would have made a whole-filename string sort group all of
+    one dataset's runs together regardless of when they actually ran.
     """
     pattern = f"result_log_*_{dataset_name}.json" if dataset_name else "result_log_*.json"
     rows = []
@@ -263,12 +246,9 @@ if __name__ == "__main__":
             return names[int(choice) - 1]
         raise SystemExit(f"Unrecognized dataset {choice!r}.")
 
-    # RESOLVED 2026-08-01 (item #17, previously genuinely open): this
-    # standalone entry point now requires a dataset too, matching
-    # main.py's `compare`/`export` -- confirmed with Melanie. Previously
-    # called build_comparison() with no dataset_name at all, silently
-    # mixing every dataset's runs into one file -- the exact thing the
-    # rest of this project explicitly forbids elsewhere.
+    # This standalone entry point requires a dataset explicitly, same as
+    # main.py's compare/export subcommands -- comparing runs across
+    # datasets is never allowed anywhere in this project's CLI surface.
     dataset_name = sys.argv[1] if len(sys.argv) > 1 else None
     if dataset_name not in DATASET_LOADERS:
         if dataset_name is not None:
@@ -282,3 +262,4 @@ if __name__ == "__main__":
     out_path.write_text(json.dumps(rows, indent=2))
 
     print(f"Compared {len(rows)} run(s) for dataset={dataset_name!r} -> {out_path}")
+    

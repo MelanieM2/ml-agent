@@ -1,7 +1,7 @@
 """Tests for compare_runs.py's summarize_run(): the "final model"
-resolution logic, and specifically the 2026-08-01 fix for the real bug
-found in result_log_2026_07_29_232959_breast_cancer.json (Gemini
-evaluated random_forest LAST purely as a comparison point, but its own
+resolution logic, and specifically the fix for the real bug found in
+result_log_2026_07_29_232959_breast_cancer.json (Gemini evaluated
+random_forest LAST purely as a comparison point, but its own
 convergence reasoning named an EARLIER logistic_regression evaluation
 as the actual chosen model -- "last evaluated = final" was wrong).
 

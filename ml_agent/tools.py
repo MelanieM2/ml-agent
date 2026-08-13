@@ -18,7 +18,8 @@ touching either category's internals - see AGENTS.md "extension points".
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+# from dataclasses import dataclass
+# from dataclasses import field
 from typing import Any, Callable
 
 # ---------------------------------------------------------------------------
@@ -320,7 +321,8 @@ TOOL_SCHEMAS: list[dict[str, Any]] = [
     },
 ]
 
-# Maps each schema's "name" to its real callable, for lookup by name.
+# Maps each schema's "name" to its real callable, for dispatch-table
+# lookup by that same name at runtime.
 TOOL_FUNCTIONS: dict[str, Callable[..., Any]] = {
     "list_available_models": list_available_models,
     "train_model": train_model,

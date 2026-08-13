@@ -10,9 +10,9 @@
 # then calls run_session exactly the way run_smoke_test.py already
 # does. No new orchestration logic lives here.
 #
-# `export` and `report` subcommands added 2026-07-31 -- both thin
-# wrappers around reporting.py, same "no new logic in main.py" principle
-# already used for `compare` below.
+# `export` and `report` subcommands are thin wrappers around
+# reporting.py, same "no new logic in main.py" principle already used
+# for `compare` below.
 
 from __future__ import annotations
 
@@ -159,21 +159,22 @@ def _run_compare(argv: list[str]) -> None:
     no new comparison logic lives here, same "no new orchestration
     logic in main.py" principle as the run path above.
 
-    --dataset is REQUIRED, not just recommended -- confirmed with
-    Melanie 2026-07-29: comparing runs across different datasets would
-    combine incomparable metrics into one file, so this is never
-    allowed, not even as an opt-in "compare everything" mode. If
-    omitted, or given but not a real dataset (typo), this prints a
-    warning explaining why and falls back to the SAME interactive
-    picker _prompt_for_dataset() already uses for the `run` path above
-    -- one piece of picker logic, not two -- rather than argparse's
-    own choices= mechanism, which would just print a bare usage error
-    and exit instead of explaining itself and re-prompting.
+    --dataset is REQUIRED, not just recommended -- comparing runs across
+    different datasets would combine incomparable metrics into one
+    file, so this is never allowed, not even as an opt-in "compare
+    everything" mode. If omitted, or given but not a real dataset
+    (typo), this prints a warning explaining why and falls back to the
+    SAME interactive picker _prompt_for_dataset() already uses for the
+    `run` path above -- one piece of picker logic, not two -- rather
+    than argparse's own choices= mechanism, which would just print a
+    bare usage error and exit instead of explaining itself and
+    re-prompting.
 
     Writes results/comparison_<timestamp>_<dataset>.json -- the
     dataset name in the filename itself is what actually solves the
-    original problem Melanie flagged (comparison_<timestamp>.json gave
-    no indication of which dataset a comparison covered)."""
+    original problem this was meant to fix (a bare
+    comparison_<timestamp>.json gave no indication of which dataset a
+    comparison covered)."""
     parser = argparse.ArgumentParser(
         prog="main.py compare",
         description=(
@@ -231,7 +232,7 @@ def _run_compare(argv: list[str]) -> None:
 def _run_export(argv: list[str]) -> None:
     """Handles `python main.py export --dataset NAME [--results-dir DIR] [--out PATH]`.
 
-    CSV spreadsheet export -- TODO #10, Melanie's explicitly named gate
+    CSV spreadsheet export -- the project's explicitly named gate
     before making the repo public. Mirrors `compare`'s exact pattern:
     --dataset is REQUIRED for the same reason build_comparison() already
     enforces it (mixing datasets' metrics into one file is never
@@ -310,15 +311,13 @@ def _run_export(argv: list[str]) -> None:
 def _run_report(argv: list[str]) -> None:
     """Handles `python main.py report <path> [--out PATH]`.
 
-    Human-friendly Markdown viewer -- TODO #4, design agreed 2026-07-24
-    (Markdown output, auto-detect by filename), built 2026-07-31.
+    Human-friendly Markdown viewer.
 
     <path> can be EITHER a result_log_*.json (one run) or a
     comparison_*.json (several runs already summarized) --
     reporting.py's load_rows()/to_markdown() auto-detect which, by
-    filename prefix only (Option A, confirmed with Melanie 2026-07-31:
-    no JSON-content-inspection fallback -- these filenames aren't
-    expected to be renamed by hand).
+    filename prefix only (no JSON-content-inspection fallback -- these
+    filenames aren't expected to be renamed by hand).
     """
     parser = argparse.ArgumentParser(
         prog="main.py report",
@@ -360,8 +359,7 @@ def main() -> None:
     # Subcommand sniffing, done BEFORE argparse sees anything -- this is
     # what makes "compare"/"export"/"report" siblings of the default run
     # path without requiring every existing invocation to be retyped
-    # with a leading "run" (confirmed with Melanie 2026-07-29 for
-    # "compare"; same pattern extended 2026-07-31 for "export"/"report"):
+    # with a leading "run":
     #   python main.py compare ...   -> handled entirely by _run_compare,
     #                                    returns immediately.
     #   python main.py export ...    -> handled entirely by _run_export,
@@ -391,8 +389,8 @@ def main() -> None:
     # Printed unconditionally, at the very start of every run -- not
     # just when --dataset is omitted -- so it's visible to a contributor
     # even when running with flags fully specified. Points at
-    # TECHNICAL_NOTES.md Part 5, §5.8 (added this session specifically
-    # so this reference has somewhere real to point to).
+    # TECHNICAL_NOTES.md Part 5, §5.8, which exists specifically to give
+    # this reference somewhere real to point to.
     print(
         "(Want to add a new dataset? Binary classification only for now "
         "-- see TECHNICAL_NOTES.md, Part 5, §5.8 'Adding a new dataset' "
@@ -455,19 +453,17 @@ def main() -> None:
     # writes when LOG_ITERATIONS=True) -- a --no-log-iterations run's
     # final result is still worth keeping.
     #
-    # Naming convention CHANGED 2026-07-29 (confirmed with Melanie):
-    # smoke_test_log_<timestamp>.json -> result_log_<timestamp>_<dataset_name>.json
-    #   - dataset_name deliberately comes AFTER the timestamp, not before,
-    #     specifically so sorting by filename still sorts chronologically
-    #     across every dataset (compare_runs.py's build_comparison()
-    #     relies on exactly this) -- putting dataset_name first would have
-    #     grouped all "breast_cancer" runs before all "climate" runs
-    #     alphabetically, silently breaking that assumption.
-    #   - compare_runs.py updated in the same session to glob
-    #     "result_log_*.json" instead of the old "smoke_test_log_*.json"
-    #     prefix -- see that file for the corresponding change.
-    #   - existing files in results/ predating this change need a
-    #     one-time migration; see rename_results.py.
+    # Naming convention: result_log_<timestamp>_<dataset_name>.json,
+    #   with dataset_name deliberately AFTER the timestamp, not before,
+    #   specifically so sorting by filename still sorts chronologically
+    #   across every dataset (compare_runs.py's build_comparison()
+    #   relies on exactly this) -- putting dataset_name first would have
+    #   grouped all "breast_cancer" runs before all "climate" runs
+    #   alphabetically, silently breaking that assumption.
+    #   - compare_runs.py globs "result_log_*.json" to match this
+    #     convention -- see that file for the corresponding pattern.
+    #   - pre-existing files using an older naming convention were
+    #     migrated with a one-time script; see rename_results.py.
     timestamp = datetime.now().strftime("%Y_%m_%d_%H%M%S")
     log_path = Path(f"results/result_log_{timestamp}_{dataset_name}.json")
     log_path.parent.mkdir(exist_ok=True, parents=True)

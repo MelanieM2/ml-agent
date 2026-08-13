@@ -24,15 +24,6 @@ from ml_agent.tools import (
     train_model,
 )
 
-# Maps each schema's "name" to its real callable, for lookup by name.
-# TOOL_FUNCTIONS = {
-#     "list_available_models": list_available_models,
-#     "train_model": train_model,
-#     "evaluate_model": evaluate_model,
-#     "record_model_proposal": record_model_proposal,
-#     "record_convergence_decision": record_convergence_decision,
-# }
-
 
 def _gemini_visible_params(fn):
     """Returns only the parameters Gemini is meant to see/supply - i.e.

@@ -11,7 +11,7 @@ from ml_agent.dataset import (
     load_dataset,
     load_breast_cancer_dataset,
     inspect_dataset,
-    get_pos_label,       # CHANGED: new import -- covers the new accessor
+    get_pos_label,
     DATASET_LOADERS,
 )
 
@@ -33,16 +33,14 @@ def test_load_dataset_dispatches_correctly():
     # without needing to hit the network -- we check identity of the
     # callable, not the data itself.
     #
-    # CHANGED: DATASET_LOADERS["breast_cancer"] is now a DatasetSpec,
-    # not the bare loader function itself -- this is the one place the
-    # DatasetSpec refactor actually breaks the old assertion. The fix
-    # is a single ".loader" added to reach through to the callable.
+    # DATASET_LOADERS' values are DatasetSpec instances, not bare loader
+    # functions -- .loader reaches through to the actual callable.
     assert DATASET_LOADERS["breast_cancer"].loader is load_breast_cancer_dataset
 
 
-# NEW: DatasetSpec carries pos_label and description alongside the
-# loader now -- these two tests cover that new surface directly,
-# since nothing in the tests above exercises it.
+# DatasetSpec carries pos_label and description alongside the loader --
+# these two tests cover that surface directly, since nothing above
+# exercises it.
 def test_dataset_loaders_have_pos_label_and_description():
     for name, spec in DATASET_LOADERS.items():
         assert isinstance(spec.pos_label, int)
@@ -62,8 +60,8 @@ def test_get_pos_label_matches_registry():
 
 
 def test_get_pos_label_unknown_name_raises():
-    # NEW: mirrors test_load_dataset_unknown_name_raises, since
-    # get_pos_label repeats the same validation pattern.
+    # Mirrors test_load_dataset_unknown_name_raises, since get_pos_label
+    # repeats the same validation pattern.
     with pytest.raises(ValueError, match="Unknown dataset"):
         get_pos_label("not_a_real_dataset")
 
@@ -72,9 +70,9 @@ def test_climate_crashes_drops_identifier_columns_and_remaps_labels(mocker):
     # Build a fake "raw" OpenML-shaped Bunch: 2 identifier columns +
     # 3 fake parameter columns, target as OpenML-style string labels.
     #
-    # UNCHANGED: this test imports load_climate_crashes_dataset directly
-    # rather than going through DATASET_LOADERS, so the DatasetSpec
-    # refactor doesn't touch it at all.
+    # This test imports load_climate_crashes_dataset directly rather
+    # than going through DATASET_LOADERS, so it's unaffected by whatever
+    # shape DATASET_LOADERS' values happen to be.
     fake_data = pd.DataFrame({
         "study_id": [1, 1, 2],
         "run_id": [1, 2, 1],

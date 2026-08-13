@@ -1,7 +1,7 @@
 """Tests for reporting.py: filename auto-detect, single-vs-comparison
 row loading, and the CSV/Markdown renderers -- including that the
-final_model_ambiguous flag (compare_runs.py, 2026-08-01) actually
-surfaces in both output formats.
+final_model_ambiguous flag (compare_runs.py) actually surfaces in both
+output formats.
 """
 from __future__ import annotations
 

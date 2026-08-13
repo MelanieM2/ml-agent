@@ -1,6 +1,6 @@
-# agent.py — wiring skeleton; orchestration loop still pending (2a resolved
-# this session: build_dispatch_table now also returns (X, y) via
-# DispatchResult, so a caller never needs a second load_dataset() call)
+# agent.py — orchestration layer: builds each run's tool dispatch table
+# (build_dispatch_table) and runs a full agent session end-to-end
+# (run_session).
 from dataclasses import dataclass
 from functools import partial
 from typing import Any, Callable
@@ -19,23 +19,22 @@ def validate_split(
 ) -> None:
     """Raises ValueError if either split has too few pos_label examples.
 
-    Pure function of its four arguments -- no Trainer/dataset construction
-    needed to test it, same testing rationale as validate_hyperparameters
-    in trainer.py: kept standalone so it's independently testable with
-    zero setup.
+    Kept standalone (pure function of its four arguments, no Trainer/
+    dataset setup needed) so it's independently testable -- same
+    rationale as validate_hyperparameters in trainer.py.
 
-    Guards against unreliable recall/precision on a near-empty rare class.
-    A threshold of 5 keeps a single misclassification's swing on the
-    metric below ~20% (1/5), while still catching a genuinely broken or
-    collapsed split (e.g. stratify silently failing). See README Data
-    Science Notes for the full statistical reasoning behind this choice.
+    Guards against unreliable recall/precision on a near-empty rare
+    class: with too few examples of the class actually being predicted,
+    a single misclassification swings the metric by a large, misleading
+    amount. A threshold of 5 keeps that swing below ~20% (1/5) per
+    example, while still catching a genuinely broken or collapsed split
+    (e.g. stratify silently failing to preserve class balance).
 
-    Only the rare class (pos_label) is checked. Given these datasets'
-    class ratios (Climate Crashes: 91.48%/8.52%; Breast Cancer: 66%/34%),
-    the majority class is never close to this floor under a stratified
-    split, so checking it would add code without adding real safety.
+    Only the rare class is checked -- given these datasets' ratios
+    (Climate Crashes 91.48%/8.52%, Breast Cancer 66%/34%), the majority
+    class is never close to this floor under a stratified split, so
+    checking it would add code without adding safety.
     """
-    # Count how many rows in each split actually belong to the rare class.
     train_count = int((y_train == pos_label).sum())
     test_count = int((y_test == pos_label).sum())
 
@@ -55,33 +54,20 @@ def validate_split(
 class DispatchResult:
     """One run's dispatch table, plus the raw data it was built from.
 
-    NEW (2026-07-17 session). Added because callers (e.g. the future
-    run_session()) need the same (X, y) that build_dispatch_table already
-    loads internally, in order to build initial_context via
-    inspect_dataset(X, y) -- without this, a caller would have to call
-    load_dataset(dataset_name) a SECOND time itself, redoing the same
-    load (and, for Climate Crashes specifically, the same OpenML network
-    fetch) for no reason. This was flagged as a known, open gap as far
-    back as the 2026-07-15 context handoff.
+    Carries dispatch_table and (X, y) only -- not a formed prompt string.
+    Callers need this same (X, y) to build initial_context via
+    inspect_dataset(), without loading the dataset a second time (costly
+    for Climate Crashes, which requires an OpenML network fetch).
+    Building the prompt itself stays the caller's job.
 
-    Deliberately narrow: carries the dispatch table and (X, y) only --
-    NOT a formed prompt string. Building initial_context (via
-    inspect_dataset + formatting) stays the caller's job, done once,
-    using this same X/y. Keeping that logic outside this function/class
-    keeps build_dispatch_table's own job unchanged: resolving what's
-    dataset- and run-specific, not writing prompts.
-
-    Shaped as a frozen dataclass (not a bare tuple) to match this
-    project's existing convention for named, self-documenting return
-    values -- see DatasetSpec in dataset.py for the precedent. Unlike
-    DatasetSpec, this lives here in agent.py rather than dataset.py,
-    since it describes build_dispatch_table's own return shape
-    specifically, not a general dataset-registry fact used elsewhere.
+    A frozen dataclass rather than a bare tuple, matching this project's
+    convention for named return values (see DatasetSpec in dataset.py).
+    Lives here rather than in dataset.py because it describes
+    build_dispatch_table's return shape specifically, not a general
+    dataset-registry fact.
     """
 
     dispatch_table: dict[str, Callable[..., Any]]
-    # X/y types confirmed directly against dataset.py's real
-    # load_dataset() signature this session -- not inferred/guessed.
     X: pd.DataFrame
     y: pd.Series
 
@@ -90,53 +76,39 @@ def build_dispatch_table(
     dataset_name: str, random_state: int = 42
 ) -> DispatchResult:
     """Builds one run's complete tool dispatch table for gemini_client.py,
-    plus the (X, y) that table was built from.
+    plus the (X, y) it was built from.
 
-    CHANGED (2026-07-17): return type is now DispatchResult, not a bare
-    dict -- see DispatchResult's own docstring above for why. Everything
-    below this point is UNCHANGED from the original version; only the
-    final return statement and the return-type annotation differ.
-
-    Given the active dataset's name, this resolves everything that's
-    dataset- or run-specific exactly once, here, so nothing downstream
-    ever needs to rediscover it:
-      - the full dataset (X, y) and its pos_label, loaded via
-        load_dataset() / get_pos_label()
-      - a stratified train/test split of that data -- a run-construction
-        concern, deliberately kept out of dataset.py, which only knows
-        how to load/describe a *whole* dataset, never how to partition
-        one for a specific run
-      - a hard validation gate (validate_split) on that split, run before
+    Given the active dataset's name, resolves everything dataset- or
+    run-specific exactly once, so nothing downstream has to rediscover
+    it:
+      - the full dataset (X, y) and its pos_label
+      - a stratified train/test split
+      - a hard validation gate (validate_split) on that split, before
         Trainer is even constructed
-      - one Trainer instance (the private model_ref -> fitted model
-        store for this run; see Trainer's own docstring)
-      - X_train/y_train and X_test/y_test/pos_label, pre-filled into
-        train_model/evaluate_model via functools.partial, so Gemini's
-        dispatch never sees any of this data as an argument at all
+      - one Trainer instance for this run
+      - train_model/evaluate_model pre-bound to X_train/y_train/X_test/
+        y_test/pos_label via functools.partial, so Gemini's dispatch
+        never sees any of this data as an argument
 
-    random_state -- CHANGED 2026-07-29: this parameter already existed
-    and was already used below for train_test_split, but was previously
-    NEVER passed on into Trainer.train_model itself. Confirmed with
-    Melanie: reuse this SAME seed for both the split AND every model's
-    own internal randomness (RandomForestClassifier's bagging, etc.),
-    rather than introducing a second, separate seed. Closes a real
-    finding from this session: RandomForestClassifier had no
-    random_state at all previously, so two runs with identical
-    hyperparameters could produce different confusion matrices.
-    bound_train below now passes random_state through the same way
-    X_train/y_train already were.
+    random_state is reused for both the train/test split and every
+    model's own internal randomness (e.g. RandomForestClassifier's
+    bagging), rather than using two separate seeds -- otherwise two runs
+    with identical hyperparameters could still produce different
+    confusion matrices.
 
-    The returned DispatchResult.dispatch_table maps each of the five tool
-    names exactly as Gemini will return them to a ready-to-call callable:
-      - Category A (list_available_models, train_model, evaluate_model)
-        are real executions - train_model validates its own arguments
-        against list_available_models()'s schema before touching sklearn.
-      - Category B (record_model_proposal, record_convergence_decision)
-        are pure structured-decision capture, stateless, wired in as-is.
+    Starts from TOOL_FUNCTIONS (tools.py) and overrides only train_model
+    and evaluate_model, the two tools that need live per-run binding
+    (Trainer, X_train, pos_label, etc.) and are otherwise unbound stubs.
+    The other three tools (list_available_models, and the two Category B
+    decision-capture tools) need no binding and are used as-is.
 
-    gemini_client.py's dispatch logic can then do
-    dispatch_table[tool_name](**args) without knowing dataset_name,
-    pos_label, the split, or the Trainer instance exist.
+    The override below replaces those two entries by literal string key,
+    not by looking them up in TOOL_FUNCTIONS first -- so renaming
+    train_model or evaluate_model inside tools.py can't silently make
+    this override stop applying. What a rename *can* still break --
+    TOOL_SCHEMAS naming a tool that no longer exists in TOOL_FUNCTIONS --
+    is caught separately, by test_tools.py's schema/function-presence
+    check.
     """
     X, y = load_dataset(dataset_name)
     pos_label = get_pos_label(dataset_name)
@@ -163,29 +135,8 @@ def build_dispatch_table(
         trainer.evaluate_model, X_test=X_test, y_test=y_test, pos_label=pos_label
     )
 
-    # 2d, RESOLVED (2026-07-17, Option B): start from TOOL_FUNCTIONS
-    # (tools.py) -- its own docstring says it exists so dispatch-table
-    # wiring here can reuse it -- then override just the 2 of 5 entries
-    # that TOOL_FUNCTIONS can't supply working versions of on its own:
-    # train_model/evaluate_model there are bare, unbound, and still
-    # raise NotImplementedError, since the real per-run Trainer/X_train/
-    # y_train/pos_label binding can only happen here, inside a live run.
-    # list_available_models and both Category B tools need no binding at
-    # all, so TOOL_FUNCTIONS' versions of those three are used as-is.
-    #
-    # RISK, originally flagged for the session summary/context/README: if
-    # train_model or evaluate_model are ever renamed in tools.py, these
-    # two override lines would silently stop overriding anything -- the
-    # stale, NotImplementedError-raising version from TOOL_FUNCTIONS
-    # would quietly take their place instead, undetected until a real
-    # run hit it. MITIGATED: test_tools.py's
-    # test_dispatch_table_override_keys_exist() guards exactly this --
-    # asserts "train_model" and "evaluate_model" still exist as keys in
-    # TOOL_FUNCTIONS, so a rename in tools.py now surfaces as a failing
-    # test instead of silently at the next live run. (Confirmed present
-    # as of the 2026-08-01 session -- the exact session it was
-    # originally added in went untracked, which is why this docstring
-    # and the TODO list had both gone stale on this point.)
+    # Overridden by literal key, not a TOOL_FUNCTIONS lookup -- see
+    # docstring above for why that matters.
     dispatch_table = {
         **TOOL_FUNCTIONS,
         "train_model": bound_train,
@@ -199,23 +150,18 @@ def _format_initial_context(facts: dict[str, Any], optimization_target: str) -> 
     """Turns inspect_dataset()'s facts + the chosen optimization target
     into the single prompt string run_agent_loop sends to Gemini first.
 
-    NEW (2026-07-17 session, Step 3). Kept as its own small function
-    (rather than inlined into run_session) so its output can be checked
-    directly in a test without needing a real dataset/Trainer/API call --
-    same "isolate the pure, checkable part" instinct as validate_split
-    and validate_hyperparameters elsewhere in this project.
+    Kept as its own small function (rather than inlined into run_session)
+    so its output can be checked directly in a test, without a real
+    dataset/Trainer/API call -- same isolate-the-pure-part rationale as
+    validate_split and validate_hyperparameters elsewhere in this
+    project.
 
-    2b, RESOLVED (2026-07-17, Option 2): optimization_target is an
-    explicit argument here, never hardcoded per dataset. This was
-    DATA_SCIENCE_ANALYSIS.md's most actionable finding -- the agent's
-    model choice was previously undetermined because nothing ever told
-    Gemini what to optimize for. Kept as a plain string parameter (not
-    baked into dataset facts) to preserve this project's existing
-    fact-vs-judgment split: which class is "positive" is a fact
-    (pos_label, resolved in dataset.py); what to optimize for is a
-    judgment call, made once per run, by whoever calls run_session --
-    not something dataset.py or build_dispatch_table should silently
-    decide on the caller's behalf.
+    optimization_target is an explicit argument here, never hardcoded
+    per dataset. This keeps a deliberate distinction: which class counts
+    as "positive" is a fixed fact about a dataset (pos_label, resolved in
+    dataset.py), but what to optimize for -- recall, precision, F1 -- is
+    a judgment call about what mistake matters more in a given run, made
+    by whoever calls run_session, not decided on their behalf here.
     """
     import json
 
@@ -245,37 +191,25 @@ def run_session(
     and dataset facts, assembles the first prompt, then hands off to
     gemini_client.run_agent_loop and returns its result.
 
-    NEW (2026-07-17 session, Step 3) -- this is the piece that was
-    "genuinely still missing" per the corrected TODO this session
-    replaced: everything it calls (build_dispatch_table, inspect_dataset,
-    run_agent_loop) already existed and worked in isolation; nothing
-    previously called them together with real, non-hand-built inputs.
-    run_smoke_test.py did this by hand, with its own duplicate
-    load_dataset() call -- this function is the real, committed
-    replacement for that pattern (see DispatchResult's docstring above
-    for why the duplicate load is now avoidable).
+    optimization_target is a plain parameter, not something this
+    function prompts for itself -- so it stays callable directly from a
+    test with a hardcoded string. A CLI entry point is responsible for
+    asking the person what to optimize for and passing the answer in
+    here.
 
-    optimization_target is deliberately a plain parameter here, not
-    something this function prompts for itself (no input() call) -- so
-    it stays callable directly from a test with a hardcoded string.
-    Whichever CLI entry point (main.py, not built this session) is
-    responsible for actually asking the person what to optimize for and
-    passing the answer in here.
+    random_state is passed straight through to build_dispatch_table; see
+    that function's docstring for what it's used for beyond the
+    train/test split.
 
-    random_state: passed straight through to build_dispatch_table
-    unchanged -- see that function's docstring (2026-07-29 update) for
-    what it's now used for beyond just the train/test split.
+    log_iterations is off by default and forwarded to run_agent_loop
+    unchanged -- run_session makes no logging decisions of its own.
 
-    log_iterations: off by default (False), passed straight through to
-    run_agent_loop unchanged -- see that function's docstring for what
-    gets logged. run_session makes no logging decisions of its own; it
-    just forwards the caller's choice.
-
-    Does NOT touch either open 07-13 judgment call (single-function-
-    call-per-turn assumption; record_convergence_decision's result not
-    echoed back on stop) -- both live entirely inside run_agent_loop,
-    untouched by this function, per this session's explicit Step 2.5
-    agreement to leave them deferred.
+    Two known limitations live inside run_agent_loop itself, untouched by
+    run_session: it assumes Gemini returns at most one function call per
+    turn (parallel function calls aren't handled), and it doesn't echo
+    record_convergence_decision's result back to Gemini when the loop
+    stops. Both are open, deliberately deferred design questions in
+    gemini_client.py, not something run_session's own wiring affects.
     """
     result = build_dispatch_table(dataset_name, random_state=random_state)
     facts = inspect_dataset(result.X, result.y)
@@ -289,9 +223,8 @@ def run_session(
         log_iterations=log_iterations,
     )
 
-# Still open, unchanged by this session (deferred deliberately -- see
-# Step 2.5 discussion): the human-in-the-loop extension point, inside
-# gemini_client.py's run_agent_loop, between record_model_proposal's
-# return and train_model's call. Not touched by run_session above --
-# run_session only wires existing pieces together, it doesn't change
-# what happens inside the loop itself.
+# Still open, deferred deliberately: the human-in-the-loop extension
+# point inside gemini_client.py's run_agent_loop, between
+# record_model_proposal's return and train_model's call. run_session
+# only wires existing pieces together -- it doesn't touch what happens
+# inside the loop itself.

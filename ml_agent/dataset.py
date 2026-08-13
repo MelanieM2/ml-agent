@@ -18,14 +18,13 @@ from sklearn.datasets import load_breast_cancer, fetch_openml
 from sklearn.utils import Bunch
 
 
-
 def load_breast_cancer_dataset() -> tuple[pd.DataFrame, pd.Series]:
     """Load the Breast Cancer Wisconsin dataset (sklearn built-in).
 
     Used as a fast, dependency-free fallback for debugging the agent
     pipeline in isolation from network calls.
     """
-    bunch = cast(Bunch, load_breast_cancer(as_frame=True)) # bunch = load_breast_cancer(as_frame=True)
+    bunch = cast(Bunch, load_breast_cancer(as_frame=True))
     X = bunch.data
     y = bunch.target
     return X, y
@@ -123,7 +122,18 @@ def inspect_dataset(X: pd.DataFrame, y: pd.Series) -> dict:
     """Produce a compact, LLM-friendly summary of a dataset.
 
     This is the single function whose output becomes part of the
-    context sent to Gemini. It intentionally never includes raw rows.
+    context sent to Gemini. It intentionally never includes raw rows --
+    only shape, target balance, missing-value counts, and per-column
+    statistics -- so Gemini gets enough to reason about the dataset's
+    characteristics without ever seeing individual records.
+
+    feature_summary includes every column, numeric or not; mean/std/
+    min/max are computed only for numeric columns (identified via
+    select_dtypes) and left as None otherwise, so a non-numeric column
+    still appears in the summary (with its dtype) rather than being
+    silently dropped. Neither of this project's two datasets currently
+    has non-numeric feature columns, so this branch doesn't trigger
+    today, but the function stays correct if that changes.
     """
     target_counts = y.value_counts()
     target_distribution = {

@@ -2,32 +2,39 @@
 """Tests for trainer.py's Trainer class: model fitting, evaluation, and
 hyperparameter validation.
 
-Central concern of this file: the 2026-07-29 fix (commit baec981) that
-threads random_state into every estimator's constructor. Before that fix,
-RandomForestClassifier was instantiated with no random_state at all
-(sklearn default None -> pulled from numpy's global RNG), so two runs with
-IDENTICAL hyperparameters could -- and did -- produce different confusion
-matrices. LogisticRegression's lbfgs solver only ever *looked* reproducible
-because it's a deterministic optimizer on a fixed convex objective, not
-because it was ever actually seeded.
+Central concern of this file: the fix that threads random_state into
+every estimator's constructor. Before that fix, RandomForestClassifier
+was instantiated with no random_state at all (sklearn default None ->
+pulled from numpy's global RNG), so two runs with IDENTICAL
+hyperparameters could -- and did -- produce different confusion
+matrices. LogisticRegression's lbfgs solver only ever *looked*
+reproducible because it's a deterministic optimizer on a fixed convex
+objective, not because it was ever actually seeded.
 
-Design choices made for this file (flagged explicitly per project
-convention, see context file for the full rationale):
-  - REAL fits, not mocked estimators.
-  - A LOCAL fixture (binary_classification_data below), not a project-wide
-    conftest.py. Nothing else in tests/ currently needs the same synthetic
-    dataset.
-  - PARAMETRIZED across all three ESTIMATOR_REGISTRY entries.
+Design choices made for this file (see DEVELOPMENT_LOG.md's "Test
+coverage" section under "Reproducibility: seeding every estimator", and
+TECHNICAL_NOTES.md Part 8, for the fuller rationale):
+  - REAL fits, not mocked estimators -- a mock would confirm Trainer
+    *calls* the estimator correctly, but the original bug was about the
+    estimator's actual numeric behavior, which only a real fit exposes.
+  - A LOCAL fixture (binary_classification_data below), not a
+    project-wide conftest.py. Nothing else in tests/ currently needs the
+    same synthetic dataset.
+  - PARAMETRIZED across all three ESTIMATOR_REGISTRY entries, not just
+    RandomForestClassifier -- the registry pattern that makes adding a
+    new model type easy is exactly what would let a future
+    random_state-threading regression on any other estimator go just as
+    unnoticed as this one did.
 
-CORRECTION LOG (2026-08-03, logged plainly per standing practice rather
-than silently smoothed over -- three attempts, in order, until one was
-actually verified rather than just theorized):
+CORRECTION LOG (logged plainly rather than smoothed over -- three
+attempts, in order, until one was actually verified empirically rather
+than just theorized):
 
-  Attempt 1 (uniform feature scaling, X * 1e5): FAILED on Melanie's
-  machine, 16/17 passing. Reasoning was wrong: multiplying every feature
-  by the SAME factor barely changes lbfgs's internal behavior at all --
-  it doesn't touch the *relative* conditioning between features, which is
-  what actually matters to a quasi-Newton solver.
+  Attempt 1 (uniform feature scaling, X * 1e5): FAILED (16/17 passing).
+  Reasoning was wrong: multiplying every feature by the SAME factor
+  barely changes lbfgs's internal behavior at all -- it doesn't touch
+  the *relative* conditioning between features, which is what actually
+  matters to a quasi-Newton solver.
 
   Attempt 2 (near-perfect linear separability via high class_sep, plus
   C=100.0): ALSO FAILED on a second real run. Reasoning was still wrong,
@@ -146,7 +153,8 @@ def trainer():
 
 
 # ---------------------------------------------------------------------
-# random_state reproducibility -- the core regression guard for baec981.
+# random_state reproducibility -- the core regression guard for the
+# random_state-threading fix.
 # ---------------------------------------------------------------------
 
 @pytest.mark.parametrize("model_type,hyperparameters", ESTIMATOR_CASES)

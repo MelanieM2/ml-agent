@@ -1,24 +1,22 @@
 # ml_agent/reporting.py — turns a single result_log_*.json (one run) or
 # an already-built comparison_*.json (several runs) into either a CSV
-# file (spreadsheet export, TODO #10 -- Melanie's named gate before
-# going public) or a Markdown report (human-friendly viewer, TODO #4 --
-# design agreed 2026-07-24: Markdown output, auto-detect by filename).
+# file (spreadsheet export -- the project's named gate before going
+# public) or a Markdown report (human-friendly viewer, auto-detected by
+# filename).
 #
-# Added 2026-07-31. Deliberately its own module, not folded into
-# main.py or compare_runs.py: both output formats need to call into
+# Deliberately its own module, not folded into main.py or
+# compare_runs.py: both output formats need to call into
 # compare_runs.py's summarize_run() (imported below), but neither
 # main.py nor compare_runs.py should import FROM this module or from
-# each other -- compare_runs.py's own standalone `python -m
-# ml_agent.compare_runs` entry point (item #17, still an open question)
-# stays exactly as decoupled from main.py as it was before this
-# session.
+# each other. compare_runs.py's own standalone `python -m
+# ml_agent.compare_runs` entry point stays exactly as decoupled from
+# main.py as it was before this module existed.
 #
-# Auto-detect strategy (Option A, confirmed with Melanie 2026-07-31):
-# filename-prefix matching only -- result_log_* vs comparison_* --
-# no JSON-content-inspection fallback. Melanie doesn't expect these
-# files to be renamed by hand; if that assumption ever breaks, this is
-# the function to revisit (Option B/C were considered and explicitly
-# deferred).
+# Auto-detect strategy: filename-prefix matching only -- result_log_*
+# vs comparison_* -- with no fallback that inspects the JSON content
+# itself. This assumes these files are never renamed by hand; a
+# content-inspection fallback was considered and explicitly deferred --
+# revisit this function if that assumption ever breaks.
 
 from __future__ import annotations
 
@@ -75,7 +73,7 @@ def load_rows(path: Path) -> tuple[list[dict[str, Any]], Kind]:
 
 
 # ---------------------------------------------------------------------
-# CSV export (TODO #10)
+# CSV export
 # ---------------------------------------------------------------------
 
 # Fixed column order -- not dict.keys() from the first row -- so every
@@ -162,7 +160,7 @@ def to_csv(rows: list[dict[str, Any]], out_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------
-# Markdown report (TODO #4, the human-friendly viewer)
+# Markdown report (the human-friendly viewer)
 # ---------------------------------------------------------------------
 
 def _format_hyperparameters(hp: dict[str, Any] | None) -> str:

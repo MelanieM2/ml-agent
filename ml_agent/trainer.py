@@ -54,47 +54,61 @@ class Trainer:
         """Fits model_type with hyperparameters, stores it, returns a ref.
 
         X_train/y_train are keyword-only, bound in via functools.partial
-        in build_dispatch_table (agent.py) — Gemini only ever supplies
+        in build_dispatch_table (agent.py) -- Gemini only ever supplies
         model_type and hyperparameters.
 
-        random_state — NEW, 2026-07-29, keyword-only, bound in the same
-        way (functools.partial in build_dispatch_table), mirroring the
-        --random-state CLI flag already used for the train/test split
-        (main.py) — confirmed with Melanie: reuse the SAME seed value
-        for both, rather than introducing a second, separate flag.
-        Passed directly into every estimator's constructor below —
-        LogisticRegression, RandomForestClassifier, and SVC all accept
-        this kwarg. Deliberately NOT exposed as a Gemini-tunable
-        hyperparameter in tools.py's schema: it's a reproducibility
-        knob, not a modeling choice the agent should be making run to
-        run. This closes a real finding from this session:
-        RandomForestClassifier was previously instantiated with no
-        random_state at all (sklearn default None, pulling from
-        numpy's global RNG), so two runs with IDENTICAL hyperparameters
-        could — and did — produce different confusion matrices.
-        LogisticRegression's lbfgs solver looked reproducible before
-        this change only because it's a deterministic optimizer on a
-        fixed convex objective, not because it was ever actually seeded.
+        random_state is keyword-only, bound the same way, reusing the
+        exact same seed value already used for the train/test split
+        (the --random-state CLI flag) rather than introducing a second,
+        separate one -- a deliberate single-shared-seed design, chosen
+        over a two-seed alternative that would isolate split-variance
+        from model-internal-variance, since this project's goal is a
+        working agent, not a formal variance study. Passed directly into
+        every estimator's constructor below. Deliberately NOT exposed as
+        a Gemini-tunable hyperparameter in tools.py's schema: it's a
+        reproducibility knob, not a modeling choice the agent should be
+        making run to run.
 
-        Returns {"model_ref": ..., "warnings": [...]} — Gemini is never
+        Of the three supported estimators, random_state is verified to
+        change fit behavior for RandomForestClassifier only (bagging/
+        feature sampling) -- previously left unseeded, which meant two
+        runs with identical hyperparameters could produce different
+        confusion matrices purely from an unseeded draw against numpy's
+        global RNG; confirmed fixed via matching post-fix runs.
+        LogisticRegression's lbfgs solver is a deterministic optimizer on
+        a fixed convex objective regardless of seeding, so it was already
+        reproducible before this parameter existed. SVC only uses
+        random_state when probability=True (it seeds the internal
+        cross-validation used for probability estimates); tools.py's
+        schema never exposes probability as tunable, so it stays False
+        here, making random_state currently a no-op for SVC specifically
+        -- not independently verified to matter, unlike RandomForestClassifier.
+        Passed uniformly to all three regardless, for constructor-interface
+        consistency and forward-compatibility (e.g. if probability=True or
+        a different SVM solver is ever exposed as tunable later), not
+        because it's confirmed to affect every estimator equally today.
+        Two narrower alternatives -- skip random_state for SVC
+        specifically, or expose probability as a tunable SVM
+        hyperparameter so the seed actually does something there --
+        were considered and deliberately deferred rather than adopted.
+
+        Returns {"model_ref": ..., "warnings": [...]} -- Gemini is never
         shown the fitted object itself, only an id it can pass back into
         evaluate_model later, plus a (possibly empty) list of any
         warnings raised during fit.
 
-        NEW (this session): fit-time warning capture. `warnings` is
-        always present, even when empty — same "consistent key-set
-        regardless of branch" convention already used for the
-        per-iteration log in gemini_client.py. Captures ALL warning
-        categories raised during fit, not just 
-        ConvergenceWarning specifically — a deliberate, 
-        confirmed design choice (07-24) 
-        to keep this general-purpose rather than hardcoding 
-        today's (07-25) one known case. 
-        simplefilter("always") is required inside the
-        catch_warnings block so a warning that already fired once
-        earlier in the same process isn't silently deduplicated by
-        Python's default once-per-location behavior — without this, a
-        second run hitting the identical warning could go undetected.
+        "warnings" is always present in the return value, even when
+        empty -- the same consistent-key-set-regardless-of-branch
+        convention used for the per-iteration log in gemini_client.py.
+        Captures every warning category raised during fit, not just
+        ConvergenceWarning specifically -- a deliberate choice to keep
+        this general-purpose rather than hardcoding around the one
+        category actually observed so far. simplefilter("always") is
+        required inside the catch_warnings block because a warning that
+        already fired once earlier in the same process would otherwise
+        be silently deduplicated by Python's default once-per-location
+        behavior -- without it, a second run hitting the identical
+        warning could go undetected.
         """
         schema = list_available_models()["models"]
         validate_hyperparameters(model_type, hyperparameters, schema)
@@ -204,7 +218,26 @@ def validate_hyperparameters(
     hyperparameters: dict[str, Any],
     schema: dict[str, Any],
 ) -> None:
-    """(unchanged — see prior version)"""
+    """Checks model_type and every hyperparameter against schema, raising
+    ValueError on the first mismatch found.
+
+    Kept as a standalone function rather than a Trainer method -- it's a
+    pure function of its three arguments, with no instance state needed,
+    so it can be tested directly without constructing a Trainer or
+    fitting anything. Exists so a hallucinated model_type, or a
+    hyperparameter value outside its documented range/choices, fails
+    immediately with a specific, readable error, instead of failing deep
+    inside whatever code instantiates the sklearn estimator -- a
+    confusing failure far from its actual cause. schema is
+    list_available_models()'s own return value, so this checks Gemini's
+    choices against the exact same information Gemini itself was shown.
+
+    Numeric ranges are treated as inclusive on both ends (low <= value
+    <= high), matching the convention stated in list_available_models's
+    own docstring -- "range" is a project-specific schema field, not a
+    real JSON Schema keyword, so nothing enforces this convention except
+    both sides agreeing to it explicitly.
+    """
     if model_type not in schema:
         raise ValueError(
             f"Unknown model_type: {model_type!r}. "
