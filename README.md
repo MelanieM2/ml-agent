@@ -219,6 +219,7 @@ methodology and numbers in `DATA_SCIENCE_ANALYSIS.md`:
 ```
 ml-agent/
 ├── DATA_SCIENCE_ANALYSIS.md    # methodology, findings, statistical reasoning
+├── DEMO_RUN.md                 # verified command sequence: setup, tests, two live runs, compare, export, report
 ├── DEVELOPMENT_LOG.md          # full session-by-session development history
 ├── README.md
 ├── SECURITY.md
@@ -354,4 +355,6 @@ automation workflows.
 
 ## Screenshots
 
-> _[PLACEHOLDER — to be added at the end, once available.]_
+A full, real command sequence — environment setup, tests, two live runs,
+compare, export, and report — is documented in [`DEMO_RUN.md`](./DEMO_RUN.md).
+Terminal screenshots are still planned for this section.
