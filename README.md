@@ -358,3 +358,8 @@ automation workflows.
 A full, real command sequence — environment setup, tests, two live runs,
 compare, export, and report — is documented in [`DEMO_RUN.md`](./DEMO_RUN.md).
 Terminal screenshots are still planned for this section.
+
+
+## Feedback
+
+This project is part of an ongoing learning and engineering journey. Constructive feedback, corrections, and suggestions for improvement are greatly appreciated. Please feel free to open an issue or contact the author through GitHub.
